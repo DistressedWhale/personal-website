@@ -20,21 +20,27 @@ serves `public/` and handles TLS and compression.
 
 ```sh
 npx wrangler dev      # local preview on http://localhost:8787
-npx wrangler deploy   # publish to the workers.dev address
+npx wrangler deploy   # publish to cetaceous.dev
 ```
 
 `bun` is the preferred runner (`bunx wrangler ...`). It was not installed when
 this page was written, so the commands show `npx`.
 
-The DNS zone for `cetaceous.dev` is already on Cloudflare. The Worker is not yet
-attached to the domain. To attach it, add this to `wrangler.jsonc` and deploy:
+### Domain
 
-```jsonc
-"routes": [{ "pattern": "cetaceous.dev", "custom_domain": true }]
-```
+The DNS zone for `cetaceous.dev` is on Cloudflare. `wrangler.jsonc` attaches the
+Worker with a zone route, `cetaceous.dev/*`. The route catches each request at
+the Cloudflare proxy, so the request never reaches the origin.
 
-Cloudflare refuses a custom domain while a DNS record for the same hostname
-exists. Delete the old records that pointed at Google Cloud Run first.
+The proxied DNS records for `cetaceous.dev` are left from the Google Cloud Run
+setup. The route needs a proxied record to exist, so do not delete them without
+a replacement.
+
+A custom domain is the tidier setup, because Cloudflare then owns the DNS
+record. Cloudflare refuses it while the old records exist (API error 100117).
+To switch: delete the old records in the dashboard, change the route to
+`{ "pattern": "cetaceous.dev", "custom_domain": true }`, and deploy. The
+wrangler login has no DNS write permission, so wrangler cannot delete them.
 
 ## Caddy
 
