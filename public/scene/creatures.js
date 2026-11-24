@@ -217,12 +217,13 @@ function mantaGeometry() {
 function createManta(shared, geometry) {
   const material = new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
-    uniforms: { ...shared, uFlap: { value: 0 }, uFlapAmp: { value: 0.85 } },
+    uniforms: { ...shared, uFlap: { value: 0 } },
     vertexShader: /* glsl */ `
       attribute float aSpan;
       attribute float aTop;
       attribute vec2 aUV;
-      uniform float uFlap, uFlapAmp;
+      uniform float uFlap;
+      const float FLAP = 0.85; // metres of wing travel at the tip
       varying vec3 vWorld;
       varying vec3 vNormal;
       varying vec2 vUV;
@@ -231,10 +232,10 @@ function createManta(shared, geometry) {
         float a = abs(aSpan);
         float ph = uFlap - a * 1.3;
         vec3 p = position;
-        p.y += uFlapAmp * pow(a, 1.5) * sin(ph);
+        p.y += FLAP * pow(a, 1.5) * sin(ph);
         p.x *= 1.0 - 0.07 * a * abs(sin(ph));
         // Tilt the normal by the slope of the bent wing.
-        float slope = uFlapAmp * (1.5 * sqrt(a) * sin(ph) - 1.3 * pow(a, 1.5) * cos(ph)) / ${MANTA_HALF_SPAN.toFixed(1)} * sign(aSpan);
+        float slope = FLAP * (1.5 * sqrt(a) * sin(ph) - 1.3 * pow(a, 1.5) * cos(ph)) / ${MANTA_HALF_SPAN.toFixed(1)} * sign(aSpan);
         vec3 n = normalize(vec3(normal.x - slope * normal.y, normal.y + slope * normal.x, normal.z));
         vec4 world = modelMatrix * vec4(p, 1.0);
         vWorld = world.xyz;
@@ -325,7 +326,7 @@ function createJellies(shared, loop, blooms, perBloom) {
   const vary = new Float32Array(count * 4);
   for (let i = 0; i < count; i++) {
     place.set([(rand() - 0.5) * 50, (rand() - 0.5) * 16, (rand() - 0.5) * 50, Math.floor(i / perBloom)], i * 4);
-    // phase, bell radius in metres, pulses per loop, tint. The pulse count is even, because the tentacles sway at half the pulse rate.
+    // phase, bell radius in metres, pulses per loop, tint. The pulse count is even, because the tentacle radius wobbles at half the pulse rate.
     vary.set([rand() * TAU, 0.30 + rand() * rand() * 0.6, 2 * Math.round(75 + rand() * 55), rand()], i * 4);
   }
   const geo = jellyGeometry();

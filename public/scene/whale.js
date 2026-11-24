@@ -185,9 +185,9 @@ const vertexShader = /* glsl */ `
 attribute vec2 aUV;
 attribute float aPart;
 attribute float aSpan;
-uniform float uSwimPhase;  // swim cycle
-uniform float uAmp;    // tail stroke size in metres
-uniform float uFlipperPhase;   // flipper cycle
+uniform float uSwimPhase;    // radians
+uniform float uAmp;          // tail stroke size in metres
+uniform float uFlipperPhase; // radians
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec3 vRest;

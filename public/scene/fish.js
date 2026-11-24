@@ -21,9 +21,11 @@ const MAX_FORCE = 18;   // metres per second squared
 const BUCKETS = 4096;
 const ENOUGH = 26;      // a fish stops counting neighbours here, which bounds the cost of a dense clump
 
-// The 27 grid cells around a fish, with its own cell first.
-const CELLS = [0, 0, 0];
-for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) if (x || y || z) CELLS.push(x, y, z);
+// Offsets of the 27 grid cells around a fish: its own cell first, then opposite pairs.
+const NEIGHBOUR_CELLS = [0, 0, 0];
+for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
+  if (x * 9 + y * 3 + z > 0) NEIGHBOUR_CELLS.push(x, y, z, -x, -y, -z);
+}
 
 function fishGeometry() {
   // A flat diamond body with a tail fin. The fish faces +Z.
@@ -208,11 +210,11 @@ export function createFish(shared) {
       const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
       const cx = Math.floor(x / SEE), cy = Math.floor(y / SEE), cz = Math.floor(z / SEE);
       let n = 0, sx = 0, sy = 0, sz = 0, mx = 0, my = 0, mz = 0, ax = 0, ay = 0, az = 0;
-      // The cells after the first start at a different place for each fish and frame. A scan that stops early then has no fixed lean.
-      const turn = (i + frame) % 26;
+      // The other cells come in opposite pairs, and the start pair turns for each fish and frame. A scan that stops early then stays balanced.
+      const turn = 2 * ((i + frame) % 13);
       scan: for (let c = 0; c < 27; c++) {
         const o = c === 0 ? 0 : (1 + ((c - 1 + turn) % 26)) * 3;
-        const b = bucket(cx + CELLS[o], cy + CELLS[o + 1], cz + CELLS[o + 2]);
+        const b = bucket(cx + NEIGHBOUR_CELLS[o], cy + NEIGHBOUR_CELLS[o + 1], cz + NEIGHBOUR_CELLS[o + 2]);
         // Two cells can share a bucket. Scan each bucket once.
         let repeat = false;
         for (let q = 0; q < c; q++) if (scanned[q] === b) { repeat = true; break; }
@@ -410,7 +412,7 @@ export function createFish(shared) {
       stream: () => byKind.stream.anchor,
     },
     // `velocity` is the velocity of the whale. `threats` lists animals to flee from as { x, y, z, r }.
-    update(time, dt, velocity, threats, whaleMesh) {
+    update(time, frameTime, velocity, threats, whaleMesh) {
       frame++;
       // The whale counts as three spheres along its body.
       const sy = Math.sin(whaleMesh.rotation.y), cy = Math.cos(whaleMesh.rotation.y);
@@ -423,8 +425,8 @@ export function createFish(shared) {
       for (const spot of whaleSpots) all.push(spot);
       for (const threat of threats) all.push(threat);
       // A long frame takes a short simulation step, so the rules stay stable.
-      const h = Math.min(dt, 1 / 30);
-      if (h > 0) for (const s of schools) step(s, h, dt, time, all, velocity);
+      const dt = Math.min(frameTime, 1 / 30);
+      if (dt > 0) for (const s of schools) step(s, dt, frameTime, time, all, velocity);
       posAttr.needsUpdate = true;
       velAttr.needsUpdate = true;
       infoAttr.needsUpdate = true;

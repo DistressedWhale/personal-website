@@ -220,8 +220,8 @@ function start() {
   const lookAt = new THREE.Vector3();
   let last = performance.now();
   let slow = 0, slowTime = 0, fast = 0;
-  let trial = null;     // a scale drop under test
-  let adaptive = true;
+  let trial = null;   // a scale drop under test
+  let adaptFrom = 0;  // seconds on the frame clock. Adapting is paused before this time.
 
   function update(dt) {
     // Stroke and glide: the whale beats its tail hard for a while, then eases off.
@@ -307,26 +307,29 @@ function start() {
     last = now;
     const dt = still ? 0 : Math.min(raw, 0.1);
     time += dt;
-    frame++;
+    if (!still) frame++; // a frozen view keeps the same noise pattern, so two captures match
     update(dt);
     render();
 
-    if (adaptive && trial) {
-      trial.time += raw;
-      if (++trial.frames === 60) {
-        // If a lower scale does not shorten the frames, the GPU is not the limit. Go back to full scale and stop adapting.
-        if (trial.time / 60 > trial.before * 0.93) { scale = 1; adaptive = false; resize(); }
-        trial = null;
+    // A tab that was hidden returns one very long frame. It says nothing about speed.
+    if (raw < 0.25 && now / 1000 >= adaptFrom) {
+      if (trial) {
+        trial.time += raw;
+        if (++trial.frames === 60) {
+          // If a lower scale does not shorten the frames, the GPU is not the limit. Undo the drop and try again in five minutes.
+          if (trial.time / 60 > trial.before * 0.93) { scale = trial.scale; adaptFrom = now / 1000 + 300; resize(); }
+          trial = null;
+        }
+      } else {
+        if (raw > 1 / 40) { slow++; slowTime += raw; fast = 0; } else if (raw < 1 / 57) { fast++; slow = 0; slowTime = 0; }
+        if (slow > 40 && scale > 0.5) {
+          trial = { scale, before: slowTime / slow, time: 0, frames: 0 };
+          scale = Math.max(0.5, scale * 0.85);
+          slow = 0; slowTime = 0;
+          resize();
+        }
+        if (fast > 600 && scale < 1) { scale = Math.min(1, scale / 0.9); fast = 0; resize(); }
       }
-    } else if (adaptive) {
-      if (raw > 1 / 40) { slow++; slowTime += raw; fast = 0; } else if (raw < 1 / 57) { fast++; slow = 0; slowTime = 0; }
-      if (slow > 40 && scale > 0.5) {
-        trial = { before: slowTime / slow, time: 0, frames: 0 };
-        scale = Math.max(0.5, scale * 0.85);
-        slow = 0; slowTime = 0;
-        resize();
-      }
-      if (fast > 600 && scale < 1) { scale = Math.min(1, scale / 0.9); fast = 0; resize(); }
     }
     requestAnimationFrame(tick);
   }

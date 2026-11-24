@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { rng } from './noise.js';
 
 // Shipwreck models. Each function returns one geometry with position, normal, colour and a texture coordinate in metres.
-// Local axes: +Z is the bow, +Y is up, and y = 0 is the sand.
+// Local axes: +Z is the bow, +Y is up, +X is port, and y = 0 is the sand.
 
-// Surface colours. The fourth number is the seam count per metre: planks for wood, plates for steel, 0 for none.
+// Surface colours. The fourth number is the seam count per metre: planks for wood, plates for steel, 0 for none, -1 for an opening.
 const WOOD = [0.200, 0.150, 0.105, 2.5];
 const WOOD_PALE = [0.420, 0.360, 0.270, 2.5];
 const WOOD_DARK = [0.070, 0.055, 0.042, 2.5];
@@ -14,7 +14,7 @@ const RUST_DARK = [0.100, 0.055, 0.040, 0.6];
 const RUST_PALE = [0.400, 0.250, 0.150, 0.6];
 const PAINT = [0.550, 0.550, 0.500, 0.6];
 const ROPE = [0.300, 0.270, 0.190, 0];
-const VOID = [0.008, 0.010, 0.013, 0]; // an opening that shows the dark inside
+const VOID = [0.008, 0.010, 0.013, -1]; // an opening that shows the dark inside
 
 const smooth = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
 const hash = (i, j) => { const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return s - Math.floor(s); };
@@ -22,38 +22,46 @@ const shade = (c, k) => [c[0] * k, c[1] * k, c[2] * k, c[3]];
 const pose = (at = [0, 0, 0], rot = [0, 0, 0]) => new THREE.Matrix4().compose(
   new THREE.Vector3(...at), new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot, 'YXZ')), new THREE.Vector3(1, 1, 1));
 
-// Collects triangles from many parts into one geometry. `at` applies a transform to all parts made inside it.
+// Collects triangles from many parts into one geometry. `within` applies a transform to all parts made inside it.
+// `section` does the same for a piece of hull, which stays rigid. Other parts follow the dune under them.
 function makeBuilder() {
   const pos = [], nor = [], col = [], uvs = [];
-  let frame = new THREE.Matrix4();
+  let transform = new THREE.Matrix4();
+  let rigid = 0;
   let parts = 0;
   const p = new THREE.Vector3(), n = new THREE.Vector3();
   const emit = (point, normal, color, u, v) => {
-    p.set(...point).applyMatrix4(frame);
-    n.set(...normal).transformDirection(frame);
-    pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); col.push(...color); uvs.push(u, v);
+    p.set(...point).applyMatrix4(transform);
+    n.set(...normal).transformDirection(transform);
+    pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); col.push(...color); uvs.push(u, v, rigid);
   };
   const b = {
-    at(matrix, make) {
-      const outer = frame;
-      frame = outer.clone().multiply(matrix);
+    within(matrix, make) {
+      const outer = transform;
+      transform = outer.clone().multiply(matrix);
       make();
-      frame = outer;
+      transform = outer;
+    },
+    section(matrix, make) {
+      rigid = 1;
+      b.within(matrix, make);
+      rigid = 0;
     },
     // A three.js geometry, in one colour. Each part gets its own tone, so that equal parts do not look identical.
-    add(geometry, color, matrix) {
+    add(geometry, color, matrix = new THREE.Matrix4()) {
       const g = geometry.index ? geometry.toNonIndexed() : geometry;
-      if (matrix) g.applyMatrix4(matrix);
       const gp = g.getAttribute('position').array, gn = g.getAttribute('normal').array;
-      // The texture runs along the longest side of the part.
+      // The texture runs along the longest side of the part, in its own frame.
       g.computeBoundingBox();
       const size = g.boundingBox.getSize(new THREE.Vector3()).toArray();
       const long = size.indexOf(Math.max(...size)), a1 = (long + 1) % 3, a2 = (long + 2) % 3;
       const id = ++parts;
       const toned = shade(color, 0.72 + 0.56 * hash(id, 17));
-      for (let i = 0; i < gp.length; i += 3) {
-        emit([gp[i], gp[i + 1], gp[i + 2]], [gn[i], gn[i + 1], gn[i + 2]], toned, gp[i + long] + id * 3.7, gp[i + a1] + gp[i + a2] + id * 1.3);
-      }
+      b.within(matrix, () => {
+        for (let i = 0; i < gp.length; i += 3) {
+          emit([gp[i], gp[i + 1], gp[i + 2]], [gn[i], gn[i + 1], gn[i + 2]], toned, gp[i + long] + id * 3.7, gp[i + a1] + gp[i + a2] + id * 1.3);
+        }
+      });
     },
     box(size, at, rot, color) { b.add(new THREE.BoxGeometry(...size), color, pose(at, rot)); },
     // A round bar between two points.
@@ -65,18 +73,24 @@ function makeBuilder() {
     },
     // A bar that follows a list of points.
     line(points, r, color) { for (let i = 0; i < points.length - 1; i++) b.spar(points[i], points[i + 1], r, color, r, 5); },
-    // A curved surface fn(u, v). `keep` drops single cells, which makes holes. `color` may be a function of the cell.
+    // A curved surface fn(u, v). Cells for which `keep` returns false are left out, which makes holes. `color` may be a function of the cell.
     patch(fn, { u = [0, 1], v = [0, 1], nu, nv, keep, color }) {
       const at = (i, j) => [u[0] + (u[1] - u[0]) * i / nu, v[0] + (v[1] - v[0]) * j / nv];
-      const normal = (uu, vv) => {
+      const cross = (uu, vv) => {
         const e = 1e-3, a = fn(uu + e, vv), c = fn(uu - e, vv), d = fn(uu, vv + e), f = fn(uu, vv - e);
         const du = [a[0] - c[0], a[1] - c[1], a[2] - c[2]], dv = [d[0] - f[0], d[1] - f[1], d[2] - f[2]];
         const x = du[1] * dv[2] - du[2] * dv[1], y = du[2] * dv[0] - du[0] * dv[2], z = du[0] * dv[1] - du[1] * dv[0];
-        const len = Math.hypot(x, y, z);
-        return len > 1e-9 ? [x / len, y / len, z / len] : [0, 1, 0];
+        return [x, y, z, Math.hypot(x, y, z)];
+      };
+      const midU = (u[0] + u[1]) / 2, midV = (v[0] + v[1]) / 2;
+      const normal = (uu, vv) => {
+        let c = cross(uu, vv);
+        // Where the patch shrinks to a point, take the normal from just inside it.
+        if (c[3] < 1e-9) c = cross(uu + (midU - uu) * 0.01, vv + (midV - vv) * 0.01);
+        return c[3] > 1e-9 ? [c[0] / c[3], c[1] / c[3], c[2] / c[3]] : [0, 1, 0];
       };
       // Size of the patch in metres, measured through its middle. The texture runs along the longer side.
-      const span = (from, to) => {
+      const arcLength = (from) => {
         let sum = 0, last = fn(...from(0));
         for (let k = 1; k <= 8; k++) {
           const next = fn(...from(k / 8));
@@ -85,21 +99,20 @@ function makeBuilder() {
         }
         return sum;
       };
-      const midU = (u[0] + u[1]) / 2, midV = (v[0] + v[1]) / 2;
-      const lenU = span((t) => [u[0] + (u[1] - u[0]) * t, midV]), lenV = span((t) => [midU, v[0] + (v[1] - v[0]) * t]);
+      const lenU = arcLength((t) => [u[0] + (u[1] - u[0]) * t, midV]), lenV = arcLength((t) => [midU, v[0] + (v[1] - v[0]) * t]);
       const id = ++parts;
-      const texture = (i, j) => (lenU >= lenV
+      const texCoord = (i, j) => (lenU >= lenV
         ? [(i / nu) * lenU + id * 3.7, (j / nv) * lenV + id * 1.3]
         : [(j / nv) * lenV + id * 3.7, (i / nu) * lenU + id * 1.3]);
-      const grid = [[0, 0], [1, 0], [0, 1], [1, 1]];
+      const corners = [[0, 0], [1, 0], [0, 1], [1, 1]];
       for (let i = 0; i < nu; i++) {
         for (let j = 0; j < nv; j++) {
           const mid = at(i + 0.5, j + 0.5);
           if (keep && !keep(i, j, mid[0], mid[1])) continue;
           const c = typeof color === 'function' ? color(i, j, mid[0], mid[1]) : color;
           for (const k of [0, 1, 2, 1, 3, 2]) {
-            const corner = at(i + grid[k][0], j + grid[k][1]);
-            emit(fn(...corner), normal(...corner), c, ...texture(i + grid[k][0], j + grid[k][1]));
+            const corner = at(i + corners[k][0], j + corners[k][1]);
+            emit(fn(...corner), normal(...corner), c, ...texCoord(i + corners[k][0], j + corners[k][1]));
           }
         }
       }
@@ -109,14 +122,14 @@ function makeBuilder() {
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
       geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
       geo.setAttribute('aColor', new THREE.Float32BufferAttribute(col, 4));
-      geo.setAttribute('aUV', new THREE.Float32BufferAttribute(uvs, 2));
+      geo.setAttribute('aUV', new THREE.Float32BufferAttribute(uvs, 3)); // texture coordinate in metres, then the rigid flag
       return geo;
     },
   };
   return b;
 }
 
-// Hull surface. u runs from stern to bow. v runs from the port rail, under the keel, to the starboard rail.
+// Hull surface. u runs from stern to bow. v runs from the starboard rail, under the keel, to the port rail.
 function hullShape({ length, beam, breadth, depth, sheer, flare, bilge }) {
   return (u, v, inset = 1) => {
     const th = (v - 0.5) * Math.PI;
@@ -129,11 +142,11 @@ function hullShape({ length, beam, breadth, depth, sheer, flare, bilge }) {
   };
 }
 
-// Things that lie on the sand around a wreck: loose timbers or plates, at random angles.
+// Loose objects that lie on the sand around a wreck, at random angles.
 function scatter(b, rand, count, near, far, make) {
   for (let i = 0; i < count; i++) {
     const a = rand() * Math.PI * 2, r = near + (far - near) * rand();
-    b.at(pose([Math.cos(a) * r * 0.6, 0, Math.sin(a) * r], [0, rand() * Math.PI * 2, 0]), () => make(i));
+    b.within(pose([Math.cos(a) * r * 0.6, 0, Math.sin(a) * r], [0, rand() * Math.PI * 2, 0]), () => make(i));
   }
 }
 
@@ -166,15 +179,15 @@ export function sailingShip() {
   const half = (u) => (B / 2) * spec.breadth(u);
   const MAIN = -0.5, QUARTER = 1.9, FORE = 1.2; // deck heights
 
-  // The ship lies over on her starboard side, with the keel under the sand.
-  b.at(pose([0, D - 2.3, 0], [0, 0, -0.30]), () => {
+  // The ship lies over on her port side, with the keel under the sand.
+  b.section(pose([0, D - 2.3, 0], [0, 0, -0.30]), () => {
     // Planking. Planks are missing in runs, most of them near the stern and around one large hole.
     b.patch(hull, {
       nu: 42, nv: 14,
       keep: (i, j, u, v) => {
         const hole = 0.9 * Math.exp(-Math.pow((u - 0.60) / 0.07, 2) - Math.pow((v - 0.22) / 0.13, 2));
-        const rot = 0.08 + 0.5 * smooth(0.42, 0.04, u) + 0.25 * smooth(0.25, 0.0, Math.min(v, 1 - v));
-        return hash(Math.floor(i / 3), j) > rot + hole;
+        const decay = 0.08 + 0.5 * smooth(0.42, 0.04, u) + 0.25 * smooth(0.25, 0.0, Math.min(v, 1 - v));
+        return hash(Math.floor(i / 3), j) > decay + hole;
       },
       color: (i, j) => shade(WOOD, 0.8 + 0.4 * hash(Math.floor(i / 3) + 40, j)),
     });
@@ -270,11 +283,11 @@ export function sailingShip() {
     }
   });
 
-  // On the sand: the masts that went over the side, guns, the anchor, barrels and loose timbers.
+  // On the sand: the masts that went over the side, guns, the anchor, barrels, crates and loose timbers.
   b.spar([3.0, 2.2, z(0.80)], [15.5, 0.25, z(0.80) + 8.5], 0.33, WOOD, 0.20, 8);
   b.spar([8.2, 0.3, z(0.80) + 1.0], [10.6, 0.22, z(0.80) + 10.0], 0.16, WOOD, 0.12);
   b.spar([3.4, 1.3, z(0.20)], [14.0, 0.22, z(0.20) - 9.0], 0.27, WOOD, 0.17, 8);
-  b.at(pose([-7.5, 0, z(0.97) + 4.5], [0, 0.7, 0]), () => anchor(b, 1.0, IRON));
+  b.within(pose([-7.5, 0, z(0.97) + 4.5], [0, 0.7, 0]), () => anchor(b, 1.0, IRON));
   scatter(b, rand, 4, 6, 12, () => b.spar([0, 0.16, -1.0], [0, 0.20, 1.1], 0.23, IRON, 0.15, 8));
   scatter(b, rand, 7, 5, 14, () => b.add(new THREE.CylinderGeometry(0.34, 0.34, 0.9, 9), WOOD_PALE, pose([0, 0.26, 0], [0, 0, Math.PI / 2])));
   scatter(b, rand, 4, 6, 13, (i) => b.box([0.9, 0.8, 1.0], [0, 0.22, 0], [0.12 * i, 0, 0.1], WOOD));
@@ -311,6 +324,8 @@ export function steamer() {
       if (hash(i, Math.round(a[2] * 3)) < 0.22) continue;
       for (const h of [0.5, 1.0]) b.spar([a[0], a[1] + height * h, a[2]], [c[0], c[1] + height * h, c[2]], 0.035, IRON, 0.035, 4);
     }
+    const end = points[points.length - 1];
+    b.spar(end, [end[0], end[1] + height, end[2]], 0.045, IRON, 0.045, 4);
   };
   // A vent with its mouth turned forward.
   const cowl = (x, y, zz) => {
@@ -358,8 +373,8 @@ export function steamer() {
     }
   };
 
-  // Bow section, heeled to port.
-  b.at(pose([0, D - 2.6, 1.5], [0, 0, 0.36]), () => {
+  // Bow section, heeled to starboard.
+  b.section(pose([0, D - 2.6, 1.5], [0, 0, 0.36]), () => {
     b.patch(hull, {
       u: [0.39, 1], nu: 40, nv: 12,
       keep: (i, j, u) => u > BOW_FROM + 0.03 * hash(j, 5) && hash(i, j + 8) > 0.03, color: plating,
@@ -379,7 +394,7 @@ export function steamer() {
     const roof = houseY + 2.6;
     railing([[-4.2, roof, z(0.44)], [-4.2, roof, z(0.47)], [-4.2, roof, z(0.50)]]);
     railing([[4.2, roof, z(0.44)], [4.2, roof, z(0.47)], [4.2, roof, z(0.50)]]);
-    b.at(pose([0, roof, z(0.47)], [-0.13, 0, 0.06]), () => {
+    b.within(pose([0, roof, z(0.47)], [-0.13, 0, 0.06]), () => {
       b.add(new THREE.CylinderGeometry(1.3, 1.45, 7.2, 14, 1, true), RUST, pose([0, 3.6, 0]));
       b.add(new THREE.CylinderGeometry(1.36, 1.38, 0.5, 14, 1, true), PAINT, pose([0, 5.6, 0]));
       b.add(new THREE.CylinderGeometry(1.39, 1.41, 0.5, 14, 1, true), PAINT, pose([0, 4.6, 0]));
@@ -387,13 +402,13 @@ export function steamer() {
       b.spar([0.2, 0, 1.5], [0.2, 6.6, 1.45], 0.13, RUST_DARK, 0.13, 5);                        // steam pipe
     });
     cowl(-2.6, roof, z(0.495)); cowl(2.6, roof, z(0.495)); cowl(-2.9, roof, z(0.445)); cowl(2.9, roof, z(0.445));
-    // Boat davits on the house roof. One boat still hangs from the starboard pair.
+    // Boat davits on the house roof. One boat still hangs from the port pair.
     for (const side of [-1, 1]) {
       for (const u of [0.455, 0.485]) {
         b.line([[side * 4.0, roof, z(u)], [side * 4.1, roof + 2.1, z(u)], [side * 4.7, roof + 2.9, z(u)], [side * 5.5, roof + 2.7, z(u)]], 0.08, IRON);
       }
     }
-    b.at(pose([5.6, roof + 1.5, z(0.47)], [0.25, 0, 0.5]), () => b.patch(lifeboat, { nu: 10, nv: 6, color: WOOD_PALE }));
+    b.within(pose([5.6, roof + 1.5, z(0.47)], [0.25, 0, 0.5]), () => b.patch(lifeboat, { nu: 10, nv: 6, color: WOOD_PALE }));
     b.spar([5.5, roof + 2.7, z(0.485)], [5.5, roof + 1.6, z(0.487)], 0.03, ROPE, 0.03, 4);
 
     // Fore mast with its crosstree, two derricks and stays. A winch sits at its foot.
@@ -421,7 +436,7 @@ export function steamer() {
   });
 
   // Stern section. It rolled the other way and settled deeper.
-  b.at(pose([-2.2, D - 3.4, -3.5], [0, 0.20, -0.52]), () => {
+  b.section(pose([-2.2, D - 3.4, -3.5], [0, 0.20, -0.52]), () => {
     b.patch(hull, {
       u: [0, 0.36], nu: 24, nv: 12,
       keep: (i, j, u) => u < STERN_TO - 0.03 * hash(j, 9) && hash(i + 50, j) > 0.04, color: plating,
@@ -436,25 +451,25 @@ export function steamer() {
     b.box([1.8, 0.9, 1.6], [0, poopY + 0.45, z(0.035)], [0, 0, 0], IRON);                        // steering gear
     b.spar([0, deckY(0.27), z(0.27)], [0.9, deckY(0.27) + 5.2, z(0.268)], 0.28, RUST_DARK, 0.22, 8); // broken main mast
     cowl(-2.4, deckY(0.29), z(0.29)); cowl(2.4, deckY(0.29), z(0.29));
-    // Rudder and propeller.
-    b.box([0.3, 5.2, 2.7], [0, -3.9, z(0.012)], [0, 0.35, 0], RUST_DARK);
-    b.spar([0, -5.6, z(0.10)], [0, -5.6, z(0.04)], 0.28, IRON, 0.28, 8);
+    // Rudder and propeller. The shaft leaves the hull above the keel.
+    b.box([0.3, 3.6, 2.7], [0, -2.3, z(0.012)], [0, 0.35, 0], RUST_DARK);
+    b.spar([0, -3.0, z(0.10)], [0, -3.0, z(0.04)], 0.28, IRON, 0.28, 8);
     for (let k = 0; k < 4; k++) {
-      b.at(pose([0, -5.6, z(0.045)], [0, 0, k * Math.PI / 2 + 0.4]), () => b.box([0.95, 1.9, 0.14], [0, 1.15, 0], [0, 0.5, 0], RUST_PALE));
+      b.within(pose([0, -3.0, z(0.045)], [0, 0, k * Math.PI / 2 + 0.4]), () => b.box([0.95, 1.9, 0.14], [0, 1.15, 0], [0, 0.5, 0], RUST_PALE));
     }
   });
 
-  // On the sand: the upper mast, a boiler that fell out of the break, a lifeboat, the anchor on its chain, and plates.
+  // On the sand: the upper mast, a boiler that fell out of the break, a lifeboat, the anchor on its chain, plates and pipes.
   b.spar([4.5, 2.0, z(0.27) - 4], [15.5, 0.25, z(0.27) - 12], 0.22, RUST_DARK, 0.12, 8);
-  b.at(pose([6.5, 0, z(0.375) - 1.0], [0, 1.1, 0]), () => {
+  b.within(pose([6.5, 0, z(0.375) - 1.0], [0, 1.1, 0]), () => {
     b.add(new THREE.CylinderGeometry(1.9, 1.9, 5.2, 14, 1, true), RUST_DARK, pose([0, 1.35, 0], [Math.PI / 2, 0, 0]));
     b.add(new THREE.CircleGeometry(1.9, 14), IRON, pose([0, 1.35, 2.6]));
     for (const x of [-0.8, 0.8]) b.add(new THREE.CircleGeometry(0.5, 9), VOID, pose([x, 0.9, 2.62]));
   });
-  b.at(pose([-10.5, 0.75, z(0.50)], [0, 0.5, Math.PI]), () => b.patch(lifeboat, { nu: 10, nv: 6, color: WOOD_PALE }));
+  b.within(pose([-10.5, -0.05, z(0.50)], [0, 0.5, Math.PI]), () => b.patch(lifeboat, { nu: 10, nv: 6, color: WOOD_PALE }));
   const chain = [[-3.2, 4.4, z(0.955) + 1.5], [-4.6, 1.3, z(0.99) + 3.5], [-5.4, 0.12, z(1) + 6.5], [-5.0, 0.1, z(1) + 10.5]];
   b.line(chain, 0.085, IRON);
-  b.at(pose([-5.0, 0, z(1) + 12.3], [0, 0.2, 0]), () => anchor(b, 1.15, IRON));
+  b.within(pose([-5.0, 0, z(1) + 12.3], [0, 0.2, 0]), () => anchor(b, 1.15, IRON));
   scatter(b, rand, 12, 7, 20, (i) => b.box([1.6 + (i % 3) * 0.8, 0.05, 1.3 + (i % 4) * 0.5], [0, 0.07, 0], [0.08, 0, 0.05], shade(RUST, 0.8 + 0.1 * (i % 4))));
   scatter(b, rand, 6, 6, 16, (i) => b.spar([0, 0.12, -1.6], [0, 0.14, 1.6 + (i % 3)], 0.11, RUST_DARK, 0.11, 6));
   return b.build();

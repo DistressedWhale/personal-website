@@ -18,13 +18,13 @@
         letter-spacing: 0.22em; text-transform: lowercase; color: rgba(214, 238, 246, 0.72);
         text-shadow: 0 0 18px rgba(2, 20, 34, 0.9); user-select: none;
       }
-      /* The note shows by itself after four seconds, in case the script never runs at all. */
+      /* The note shows by itself after eight seconds, in case the script never runs at all. */
       .fallback { display: grid; position: fixed; inset: 0; place-items: center; text-align: center; padding: 2rem; margin: 0;
         font: 400 0.95rem/1.6 ui-monospace, Menlo, Consolas, monospace; color: rgba(214, 238, 246, 0.8);
-        opacity: 0; animation: reveal 0s 4s forwards; pointer-events: none; }
-      @keyframes reveal { to { opacity: 1; } }
+        visibility: hidden; animation: reveal 0s 8s forwards; pointer-events: none; }
+      @keyframes reveal { to { visibility: visible; } }
       .live .fallback { display: none; }
-      .no-webgl .fallback { animation: none; opacity: 1; }
+      .no-webgl .fallback { animation: none; visibility: visible; }
       .no-webgl #scene { display: none; }
     </style>
     <script type="importmap">
@@ -33,7 +33,7 @@
   </head>
   <body>
     <canvas id="scene" role="img" aria-label="A blue whale swimming through the open ocean"></canvas>
-    <p class="fallback">This page draws a blue whale with WebGL2. This browser could not start it.</p>
+    <p class="fallback">This page draws a blue whale with WebGL2. If nothing appears, this browser could not start it.</p>
     <div class="mark">cetaceous.dev</div>
     <script type="module" src="/scene/main.js"></script>
   </body>

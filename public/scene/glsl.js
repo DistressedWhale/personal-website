@@ -2,7 +2,7 @@
 
 export const FINE_TILE = 32;
 export const SWELL_TILE = 128;
-export const NOISE_SIZE = 256; // pixels along one side of the noise texture
+export const NOISE_SIZE = 256; // texels along one side of the noise texture
 
 export const common = /* glsl */ `
 uniform sampler2D uWaveTex;   // fine waves.  r: caustic, gb: height gradient, a: height

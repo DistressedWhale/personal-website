@@ -92,7 +92,7 @@ export function createSeafloor(shared) {
     vertexShader: /* glsl */ `
       ${common}
       attribute vec4 aColor;
-      attribute vec2 aUV;
+      attribute vec3 aUV; // texture coordinate in metres, then the rigid flag
       varying vec3 vWorld;
       varying vec3 vNormal;
       varying vec4 vColor;
@@ -100,12 +100,12 @@ export function createSeafloor(shared) {
       varying float vHeight;
       void main() {
         vec4 w = modelMatrix * vec4(position, 1.0);
-        // Model height 0 is the sand. Each vertex takes the dune height at its own place, so debris lies on the slope.
-        w.y += floorHeight(w.xz);
+        // Model height 0 is the sand. Debris takes the dune height at its own place. A hull takes it at the wreck origin, so it does not bend.
+        w.y += floorHeight(mix(w.xz, modelMatrix[3].xz, aUV.z));
         vWorld = w.xyz;
         vNormal = normalize(mat3(modelMatrix) * normal);
         vColor = aColor;
-        vUV = aUV;
+        vUV = aUV.xy;
         vHeight = position.y;
         gl_Position = projectionMatrix * viewMatrix * w;
       }
@@ -125,9 +125,9 @@ export function createSeafloor(shared) {
         float wood = step(1.5, seams);
         float plate = step(0.1, seams) * (1.0 - wood);
         // Openings stay dark. Texture, growth and silt only cover solid surfaces.
-        float solid = smoothstep(0.015, 0.05, max(vColor.r, max(vColor.g, vColor.b)));
+        float solid = step(0.0, seams);
 
-        // Streaks along the part: wood grain, or rust that ran down a plate.
+        // Streaks along every part, and rust that ran down each steel plate.
         float grain = texture(uNoise, vec2(vUV.x * 0.06, vUV.y * 0.9)).b;
         float runs = texture(uNoise, vec2(vUV.x * 0.8, vUV.y * 0.05) + 0.5).g;
         vec3 albedo = vColor.rgb * mix(1.0, 0.40 + 1.2 * grain, solid) * mix(1.0, 0.55 + 0.9 * runs, plate);
@@ -142,13 +142,13 @@ export function createSeafloor(shared) {
 
         // Growth: pale crusts in some places, dark weed in others, and bright specks of shell.
         float patches = texture(uNoise, vUV * 0.085 + 0.37).r;
-        float specks = texture(uNoise, vUV * 0.7 + 0.11).g;
+        float shells = texture(uNoise, vUV * 0.7 + 0.11).g;
         albedo = mix(albedo, vec3(0.30, 0.42, 0.31), smoothstep(0.53, 0.70, patches) * 0.6 * solid);
         albedo = mix(albedo, vec3(0.025, 0.080, 0.065), (1.0 - smoothstep(0.30, 0.47, patches)) * 0.55 * solid);
-        albedo += vec3(0.30, 0.33, 0.27) * smoothstep(0.70, 0.82, specks) * 0.55 * solid;
+        albedo += vec3(0.30, 0.33, 0.27) * smoothstep(0.70, 0.82, shells) * 0.55 * solid;
         // Silt settles on every face that points up.
         albedo = mix(albedo, SAND * 0.9, smoothstep(0.5, 0.95, N.y) * 0.45 * solid);
-        // Less light reaches the parts that sit low, in the lee of the hull.
+        // Parts close to the sand get less scattered light, because the hull and the sand block it.
         albedo *= 0.55 + 0.45 * smoothstep(-0.5, 5.0, vHeight);
 
         gl_FragColor = vec4(shadeSurface(albedo, N, V, vWorld, 8.0, 0.0), 1.0);
