@@ -1,0 +1,9 @@
+{
+  "name": "personal-website",
+  "compatibility_date": "2026-11-01",
+  // The Worker has no script. Cloudflare serves the files in public/ directly.
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  }
+}

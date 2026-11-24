@@ -1,0 +1,6 @@
+# Local and self-hosted fallback. Production runs on a Cloudflare Worker, see wrangler.jsonc.
+:8080 {
+	encode zstd gzip
+	root * public
+	file_server
+}
