@@ -4,6 +4,7 @@ import { makeNoiseTexture } from './noise.js';
 import { createOcean } from './ocean.js';
 import { createWhale } from './whale.js';
 import { createFish } from './fish.js';
+import { createCreatures } from './creatures.js';
 
 const TAU = Math.PI * 2;
 const canvas = document.getElementById('scene');
@@ -43,6 +44,9 @@ function start() {
 
   const fish = createFish(shared);
   scene.add(fish.mesh);
+
+  const creatures = createCreatures(shared, noise, whale.mesh);
+  scene.add(creatures.group);
 
   // The scene renders to a float target. A second pass adds the light shafts and maps the result to the screen.
   const target = new THREE.WebGLRenderTarget(4, 4, {
@@ -162,14 +166,44 @@ function start() {
   window.addEventListener('resize', resize);
   resize();
 
+  // Moving the mouse nudges the camera. Dragging turns it around the whale.
   const pointer = new THREE.Vector2();
   const pointerSmooth = new THREE.Vector2();
-  window.addEventListener('pointermove', (e) => {
-    pointer.set((e.clientX / window.innerWidth) * 2 - 1, (e.clientY / window.innerHeight) * 2 - 1);
+  const drag = { active: false, id: -1, x: 0, y: 0, az: 0, el: 0, idle: 0 };
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    drag.active = true;
+    drag.id = e.pointerId;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add('dragging');
   });
+  window.addEventListener('pointermove', (e) => {
+    if (drag.active && e.pointerId === drag.id) {
+      const span = Math.min(window.innerWidth, window.innerHeight);
+      drag.az -= ((e.clientX - drag.x) / span) * 3.2;
+      drag.el += ((e.clientY - drag.y) / span) * 2.4;
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+    } else if (e.pointerType === 'mouse') {
+      pointer.set((e.clientX / window.innerWidth) * 2 - 1, (e.clientY / window.innerHeight) * 2 - 1);
+    }
+  });
+  const release = (e) => {
+    if (!drag.active || e.pointerId !== drag.id) return;
+    drag.active = false;
+    drag.idle = 0;
+    // Keep the angle within half a turn, so the camera goes home the short way.
+    drag.az = ((((drag.az + Math.PI) % TAU) + TAU) % TAU) - Math.PI;
+    canvas.classList.remove('dragging');
+  };
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
 
   // Fixed values from the address bar, for checking one view: ?t=120&az=0.5&el=0.2&dist=40
   const fixed = { az: num('az'), el: num('el'), dist: num('dist') };
+  const focus = query.get('focus');
   const still = query.has('still');
 
   let time = num('t') ?? 0;
@@ -210,14 +244,32 @@ function start() {
     shared.uTravel.value.set(travel.x % 512, travel.z % 512);
 
     // Chase camera. It drifts around the rear of the whale and never settles.
-    pointerSmooth.lerp(pointer, 1 - Math.exp(-dt * 2.5));
+    fish.update(time, dt, velocity);
+    creatures.update(time, dt, velocity);
+
+    // After a drag the camera holds the chosen view for a few seconds, then eases back to its own path.
+    if (drag.active) {
+      pointerSmooth.multiplyScalar(Math.exp(-dt * 4));
+    } else {
+      pointerSmooth.lerp(pointer, 1 - Math.exp(-dt * 2.5));
+      drag.idle += dt;
+      if (drag.idle > 6) {
+        const ease = Math.exp(-dt * 0.35);
+        drag.az *= ease;
+        drag.el *= ease;
+      }
+    }
     // On a tall screen a side view cuts the whale off, so the camera stays closer to the rear.
     const tall = camera.aspect < 1;
-    const az = (fixed.az ?? (1.05 * Math.sin(time * 0.0310 + 0.9) + 0.70 * Math.sin(time * 0.0173 + 1.3)) * (tall ? 0.28 : 1)) + pointerSmooth.x * 0.25;
+    const pathAz = fixed.az ?? (1.05 * Math.sin(time * 0.0310 + 0.9) + 0.70 * Math.sin(time * 0.0173 + 1.3)) * (tall ? 0.28 : 1);
+    const az = pathAz + pointerSmooth.x * 0.25 + drag.az;
     // Straight behind, a level view hides the body. The camera rises there to show the back.
-    const el = (fixed.el ?? 0.02 + 0.30 * Math.sin(time * 0.0230 + 2.1) + 0.14 * Math.sin(time * 0.0097) + 0.34 * Math.cos(az) ** 2) - pointerSmooth.y * 0.15;
+    const pathEl = fixed.el ?? 0.02 + 0.30 * Math.sin(time * 0.0230 + 2.1) + 0.14 * Math.sin(time * 0.0097) + 0.34 * Math.cos(pathAz) ** 2;
+    const el = THREE.MathUtils.clamp(pathEl - pointerSmooth.y * 0.15 + drag.el, -1.35, 1.35);
+    drag.el = THREE.MathUtils.clamp(drag.el, -1.35 - pathEl, 1.35 - pathEl);
     const dist = (fixed.dist ?? 35 + 7 * Math.sin(time * 0.0170 + 2.0) + 4 * Math.sin(time * 0.0071)) * (tall ? 1.45 : 1);
     lookAt.set(Math.sin(yaw) * 3, depth + 0.5, Math.cos(yaw) * 3);
+    if (focus && creatures.targets[focus]) lookAt.copy(creatures.targets[focus]());
     camera.position.set(
       lookAt.x + Math.sin(az + yaw) * Math.cos(el) * dist,
       Math.min(lookAt.y + Math.sin(el) * dist, -4.5),
@@ -226,8 +278,6 @@ function start() {
     camera.lookAt(lookAt);
     camera.updateMatrixWorld();
     shared.uCamDepth.value = -camera.position.y;
-
-    fish.update(time, dt, velocity);
   }
 
   function render() {

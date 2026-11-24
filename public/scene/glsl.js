@@ -55,4 +55,20 @@ float causticAt(vec3 worldPos) {
 vec3 sunAt(float depth) {
   return vec3(1.0, 0.96, 0.88) * exp(-ABSORB * max(depth, 0.0) / uSunDir.y);
 }
+
+// Standard lighting for an animal: caustic sunlight from above, scattered light from all sides, then fog.
+vec3 shadeSkin(vec3 albedo, vec3 N, vec3 V, vec3 worldPos, float gloss, float flash) {
+  float depth = -worldPos.y;
+  float ndl = dot(N, uSunDir);
+  float caustic = causticAt(worldPos);
+  vec3 sun = sunAt(depth) * clamp((ndl + 0.35) / 1.35, 0.0, 1.0) * mix(1.0, caustic, 0.8 * smoothstep(-0.05, 0.35, ndl));
+  float skyward = N.y * 0.5 + 0.5;
+  vec3 ambient = mix(vec3(0.010, 0.060, 0.110), vec3(0.060, 0.330, 0.470), skyward * skyward)
+               * exp(-vec3(0.060, 0.020, 0.014) * depth);
+  vec3 col = albedo * (sun * 1.3 + ambient * 1.5);
+  vec3 H = normalize(uSunDir + V);
+  col += sunAt(depth) * pow(max(dot(N, H), 0.0), gloss) * flash * (0.3 + caustic);
+  col += waterBg(reflect(-V, N)) * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.6;
+  return fogged(col, worldPos);
+}
 `;
