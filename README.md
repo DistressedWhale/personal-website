@@ -17,7 +17,8 @@ model files.
 | `public/scene/ocean.js` | Wave textures, sea surface, backdrop, drifting specks |
 | `public/scene/fish.js` | Sardine schools, simulated as boids |
 | `public/scene/creatures.js` | Tuna packs, pilot fish, manta rays, jellyfish |
-| `public/scene/seafloor.js` | Sand floor, whale shadow, two shipwrecks |
+| `public/scene/seafloor.js` | Sand floor, whale shadow, placement of the shipwrecks |
+| `public/scene/wrecks.js` | Shipwreck models: a wooden sailing ship and a steamer broken in two |
 | `public/scene/glsl.js` | Water colour, fog and caustic code shared by all shaders |
 | `public/scene/noise.js` | Seeded random numbers and the tileable noise texture |
 | `public/vendor/three/` | three.js r187, bundled to one minified file with esbuild |
@@ -28,8 +29,8 @@ value before it goes to a shader, so the picture does not degrade over days.
 Address parameters fix one view for checks: `?t=120` sets the start time in
 seconds, `?az=0.5&el=0.2&dist=40` fix the camera angle and distance, and
 `?rays=0` turns the light shafts off, and `?focus=` points the camera at
-something other than the whale: `tuna`, `manta`, `jelly`, `ball`, `ring`,
-`stream` or `wreck`.
+something other than the whale: `tuna`, `manta`, `jelly`, `ball`,
+`roam`, `split`, `stream`, `wreck` or `wreck2`.
 
 A drag with the left mouse button, or one finger, turns the camera around the
 whale. Six seconds after release the camera eases back to its own path.
@@ -45,7 +46,8 @@ Each school adds one rule for its pattern:
 | Pattern | Rule |
 | --- | --- |
 | Ball | Stay inside a sphere that slowly swells and shrinks, and circle its upright axis |
-| Ring | Hold a circle of fixed radius and swim around it |
+| Roam | Swim toward a point that wanders, so the school keeps changing shape |
+| Split | Like roam, with two points that drift apart and back, so the school divides and rejoins |
 | Stream | Follow a slowly turning course as one long ribbon |
 
 Every fish flees from the whale, the tuna and the manta rays. A tuna pack picks

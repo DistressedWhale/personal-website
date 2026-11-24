@@ -5,13 +5,19 @@ import { rng } from './noise.js';
 // Sardine schools, simulated as boids. Each fish steers by three local rules: keep clear of close
 // neighbours, match their heading, and stay with them. Each school adds one rule for its pattern,
 // and every fish flees from large animals. No fish follows a scripted path.
+//
+// Patterns:
+//   ball   - a bait ball that turns about its upright axis
+//   roam   - a loose school that chases a wandering point, so its shape keeps changing
+//   split  - like roam, but with two points that drift apart and back, so the school divides and rejoins
+//   stream - a long ribbon on a steady course
 
 const TAU = Math.PI * 2;
 const SCHOOLS = [
   { kind: 'ball', count: 640 },
   { kind: 'ball', count: 560 },
-  { kind: 'ring', count: 620 },
-  { kind: 'ring', count: 520 },
+  { kind: 'roam', count: 620 },
+  { kind: 'split', count: 560 },
   { kind: 'stream', count: 640 },
 ];
 const TOTAL = SCHOOLS.reduce((n, s) => n + s.count, 0);
@@ -20,6 +26,7 @@ const SEE = 1.35;       // metres. A fish reacts to neighbours inside this dista
 const CLEAR = 0.62;     // metres. Closer than this, neighbours push apart.
 const MAX_PUSH = 18;    // metres per second squared
 const BUCKETS = 4096;
+const ENOUGH = 26;      // a fish stops counting neighbours here, which bounds the cost of a dense clump
 
 function fishGeometry() {
   // A flat diamond body with a tail fin. The fish faces +Z.
@@ -71,7 +78,11 @@ export function createFish(shared) {
       spin: rand() < 0.5 ? -1 : 1, breathe: range(0, TAU), heading: 0, wander: range(0, TAU),
     };
     if (def.kind === 'ball') { school.radius = 0.62 * Math.cbrt(def.count); school.cruise = 1.5; }
-    if (def.kind === 'ring') { school.radius = range(7.5, 10); school.cruise = 2.1; }
+    if (def.kind === 'roam' || def.kind === 'split') {
+      school.cruise = 2.5;
+      school.points = def.kind === 'split' ? [new THREE.Vector3(), new THREE.Vector3()] : [new THREE.Vector3()];
+      school.phase = [0, 1, 2, 3, 4, 5, 6].map(() => range(0, TAU));
+    }
     if (def.kind === 'stream') { school.radius = 2.8; school.half = 15; school.cruise = 4.4; }
     for (let i = first; i < school.end; i++) {
       // Start each fish inside its pattern, already moving the right way.
@@ -80,11 +91,10 @@ export function createFish(shared) {
         const r = school.radius * Math.cbrt(rand()), a = rand() * TAU, c = rand() * 2 - 1, s = Math.sqrt(1 - c * c);
         x = r * s * Math.cos(a); y = r * c; z = r * s * Math.sin(a);
         vx = -Math.sin(a) * school.spin; vz = Math.cos(a) * school.spin;
-      } else if (def.kind === 'ring') {
-        const a = rand() * TAU, tube = 1.5 * Math.sqrt(rand()), b = rand() * TAU;
-        const rho = school.radius + tube * Math.cos(b);
-        x = rho * Math.cos(a); y = tube * Math.sin(b); z = rho * Math.sin(a);
-        vx = -Math.sin(a) * school.spin; vz = Math.cos(a) * school.spin;
+      } else if (def.kind === 'roam' || def.kind === 'split') {
+        const r = 5 * Math.cbrt(rand()), a = rand() * TAU, c = rand() * 2 - 1, s = Math.sqrt(1 - c * c);
+        x = r * s * Math.cos(a); y = r * c * 0.6; z = r * s * Math.sin(a);
+        vx = Math.cos(school.wander); vz = Math.sin(school.wander);
       } else {
         const r = school.radius * Math.sqrt(rand()), b = rand() * TAU;
         x = r * Math.cos(b); y = r * Math.sin(b) * 0.7; z = range(-school.half, school.half);
@@ -108,7 +118,6 @@ export function createFish(shared) {
     } else {
       s.anchor.set(side * range(0, 42), -range(9, 36), startUp ? range(-30, 150) : range(125, 200));
       s.drift.set(range(-0.3, 0.3), 0, range(-0.3, 0.4));
-      if (s.kind === 'ring') s.radius = range(7.5, 10);
     }
   };
   schools.forEach((s) => place(s, true));
@@ -201,14 +210,16 @@ export function createFish(shared) {
       const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
       const cx = Math.floor(x / SEE), cy = Math.floor(y / SEE), cz = Math.floor(z / SEE);
       let n = 0, sx = 0, sy = 0, sz = 0, mx = 0, my = 0, mz = 0, ax = 0, ay = 0, az = 0;
-      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      scan: for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
         const b = bucket(cx + dx, cy + dy, cz + dz);
         for (let k = bucketStart[b], e = bucketStart[b + 1]; k < e; k++) {
           const j = order[k];
+          stats.tests++;
           if (j === i) continue;
           const ox = x - pos[j * 3], oy = y - pos[j * 3 + 1], oz = z - pos[j * 3 + 2];
           const d2 = ox * ox + oy * oy + oz * oz;
-          if (d2 > see2 || d2 < 1e-8) continue;
+          // Written so that a broken (not-a-number) distance fails the test.
+          if (!(d2 <= see2 && d2 > 1e-8)) continue;
           n++;
           sx += pos[j * 3]; sy += pos[j * 3 + 1]; sz += pos[j * 3 + 2];
           mx += vel[j * 3]; my += vel[j * 3 + 1]; mz += vel[j * 3 + 2];
@@ -216,8 +227,10 @@ export function createFish(shared) {
             const d = Math.sqrt(d2), w = (CLEAR - d) / (CLEAR * d);
             ax += ox * w; ay += oy * w; az += oz * w;
           }
+          if (n >= ENOUGH) break scan;
         }
       }
+      stats.pairs += n;
       let fx = ax * 9, fy = ay * 9, fz = az * 9;                            // keep clear
       if (n > 0) {
         const inv = 1 / n;
@@ -228,6 +241,9 @@ export function createFish(shared) {
       social[i * 3] = fx; social[i * 3 + 1] = fy; social[i * 3 + 2] = fz;
     }
   }
+
+  // Counters for performance checks.
+  const stats = { pairs: 0, tests: 0, repaired: 0 };
 
   const local = []; // threats in the frame of the current school: x, y, z, radius
   let frame = 0;
@@ -253,6 +269,23 @@ export function createFish(shared) {
       s.drift.set(dirX * s.cruise, 0.25 * Math.sin(s.wander * 0.7), dirZ * s.cruise);
     }
     const ball = s.kind === 'ball' ? s.radius * (1 + 0.14 * Math.sin(time * 0.45 + s.breathe)) : 0;
+    if (s.points) {
+      // The point wanders on a path that never repeats exactly. Its top speed stays below the cruise speed.
+      const f = s.phase;
+      const x = 11 * Math.sin(time * 0.097 + f[0]) + 5 * Math.sin(time * 0.213 + f[1]);
+      const y = 4 * Math.sin(time * 0.071 + f[2]);
+      const z = 11 * Math.sin(time * 0.083 + f[3]) + 5 * Math.sin(time * 0.187 + f[4]);
+      if (s.points.length > 1) {
+        // The two points sit together for about half of each cycle, then swing apart.
+        const apart = Math.max(0, Math.sin(time * 0.043 + f[5]));
+        const gap = 10 * apart * apart * (3 - 2 * apart), turn = time * 0.05 + f[6];
+        const ox = Math.cos(turn) * gap, oy = 0.3 * Math.sin(turn * 0.8) * gap, oz = Math.sin(turn) * gap;
+        s.points[0].set(x + ox, y + oy, z + oz);
+        s.points[1].set(x - ox, y - oy, z - oz);
+      } else {
+        s.points[0].set(x, y, z);
+      }
+    }
 
     for (let i = s.first; i < s.end; i++) {
       const k = i * 3;
@@ -269,14 +302,17 @@ export function createFish(shared) {
         const turn = 0.6 * Math.min(rho / ball, 1);
         fx += (-z / rho * s.spin * s.cruise - vx) * turn;
         fz += (x / rho * s.spin * s.cruise - vz) * turn;
-      } else if (s.kind === 'ring') {
-        // Mill: hold a circle of fixed radius and swim around it.
-        const rho = Math.hypot(x, z) + 1e-5;
-        const off = rho - s.radius;
-        fx -= (x / rho) * off * 2.2; fz -= (z / rho) * off * 2.2;
-        fy -= y * 1.4;
-        fx += (-z / rho * s.spin * s.cruise - vx) * 1.1;
-        fz += (x / rho * s.spin * s.cruise - vz) * 1.1;
+      } else if (s.points) {
+        // Roam: swim toward the nearest wandering point. Close to it there is no pull, so the fish mill freely.
+        let px = s.points[0].x, py = s.points[0].y, pz = s.points[0].z;
+        let d = Math.hypot(px - x, py - y, pz - z);
+        if (s.points.length > 1) {
+          const q = s.points[1], dq = Math.hypot(q.x - x, q.y - y, q.z - z);
+          if (dq < d) { px = q.x; py = q.y; pz = q.z; d = dq; }
+        }
+        d += 1e-5;
+        const pull = 0.15 + 2.4 * Math.min(Math.max((d - 2.5) / 7, 0), 1.5);
+        fx += ((px - x) / d) * pull; fy += ((py - y) / d) * pull * 1.3; fz += ((pz - z) / d) * pull;
       } else {
         // Stream: travel as one long ribbon along a slowly turning course.
         fx += (s.drift.x - vx) * 1.0; fy += (s.drift.y - vy) * 1.0; fz += (s.drift.z - vz) * 1.0;
@@ -298,7 +334,8 @@ export function createFish(shared) {
         const ox = x - local[t], oy = y - local[t + 1], oz = z - local[t + 2];
         const d2 = ox * ox + oy * oy + oz * oz, r = local[t + 3];
         if (d2 < r * r) {
-          const d = Math.sqrt(d2) + 1e-5, near = 1 - d / r;
+          // The small offset can lift d above r. Without the clamp, near goes negative and its square root is not a number.
+          const d = Math.sqrt(d2) + 1e-5, near = Math.max(0, 1 - d / r);
           const push = 26 * near * Math.sqrt(near) / d;
           fx += ox * push; fy += oy * push; fz += oz * push;
           if (near > panic[i]) panic[i] = Math.min(1, near * 1.5);
@@ -323,6 +360,15 @@ export function createFish(shared) {
       vx *= scale; vy *= scale; vz *= scale;
       panic[i] *= Math.exp(-dt * 1.1);
 
+      // Safety net: a fish with a broken value would spread it to its neighbours. Put it back at the centre.
+      if (!Number.isFinite(vx + vy + vz + x + y + z)) {
+        pos[k] = 0; pos[k + 1] = 0; pos[k + 2] = 0;
+        vel[k] = 0; vel[k + 1] = 0; vel[k + 2] = s.cruise;
+        social[k] = 0; social[k + 1] = 0; social[k + 2] = 0;
+        panic[i] = 0;
+        stats.repaired++;
+        continue;
+      }
       vel[k] = vx; vel[k + 1] = vy; vel[k + 2] = vz;
       pos[k] = x + (vx - s.drift.x) * dt;
       pos[k + 1] = y + (vy - s.drift.y) * dt;
@@ -338,16 +384,20 @@ export function createFish(shared) {
   }
 
   const all = [];
+  const roamView = new THREE.Vector3();
   const BODY = [8, 0.5, -8];
   const whaleSpots = BODY.map(() => ({ x: 0, y: 0, z: 0, r: 5.6 }));
   return {
     mesh,
     count: TOTAL,
+    stats,
+    schools,
     // Bait balls, for hunters to aim at.
     prey: schools.filter((s) => s.kind === 'ball').map((s) => s.anchor),
     targets: {
       ball: () => schools[0].anchor,
-      ring: () => schools[2].anchor,
+      roam: () => roamView.copy(schools[2].anchor).add(schools[2].points[0]),
+      split: () => roamView.copy(schools[3].points[0]).add(schools[3].points[1]).multiplyScalar(0.5).add(schools[3].anchor),
       stream: () => schools[4].anchor,
     },
     // `flow` is the velocity of the whale. `threats` lists animals to flee from as { x, y, z, r }.

@@ -277,10 +277,12 @@ function start() {
     lookAt.set(Math.sin(yaw) * 3, depth + 0.5, Math.cos(yaw) * 3);
     if (focus && creatures.targets[focus]) lookAt.copy(creatures.targets[focus]());
     if (focus && fish.targets[focus]) lookAt.copy(fish.targets[focus]());
-    if (focus === 'wreck') lookAt.copy(seafloor.target());
+    if (focus === 'wreck') lookAt.copy(seafloor.target(0));
+    if (focus === 'wreck2') lookAt.copy(seafloor.target(1));
     camera.position.set(
       lookAt.x + Math.sin(az + yaw) * Math.cos(el) * dist,
-      THREE.MathUtils.clamp(lookAt.y + Math.sin(el) * dist, -46, -4.5),
+      // A test view with ?focus may go deeper, to inspect the sea floor.
+      THREE.MathUtils.clamp(lookAt.y + Math.sin(el) * dist, focus ? -68 : -46, -4.5),
       lookAt.z - Math.cos(az + yaw) * Math.cos(el) * dist,
     );
     camera.lookAt(lookAt);

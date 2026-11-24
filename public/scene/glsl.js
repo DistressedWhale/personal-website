@@ -40,10 +40,17 @@ vec3 fogged(vec3 col, vec3 worldPos) {
 }
 
 // Height of the sand at a world position: broad dunes plus small bumps. The pattern repeats every 512 m.
+// Texture coordinate that eases between texels. Plain linear filtering leaves a visible grid of creases in the sand.
+vec2 eased(vec2 uv) {
+  uv = uv * 256.0 + 0.5;
+  vec2 f = fract(uv);
+  return (floor(uv) + f * f * (3.0 - 2.0 * f) - 0.5) / 256.0;
+}
+
 float floorHeight(vec2 xz) {
   vec2 uv = (xz + uTravel) / 512.0;
-  float dunes = textureLod(uTerrain, uv, 0.0).r;
-  float bumps = textureLod(uTerrain, uv * 4.0 + 0.3, 0.0).g;
+  float dunes = textureLod(uTerrain, eased(uv), 0.0).r;
+  float bumps = textureLod(uTerrain, eased(uv * 4.0 + 0.3), 0.0).g;
   return FLOOR_Y + (dunes - 0.5) * 16.0 + (bumps - 0.5) * 3.5;
 }
 
