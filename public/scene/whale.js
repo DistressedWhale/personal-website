@@ -1,9 +1,8 @@
 import * as THREE from 'three';
 import { common } from './glsl.js';
 
-export const WHALE_LENGTH = 25;
-const L = WHALE_LENGTH;
-const NOSE_Z = 11; // the whale faces +Z. u = 0 is the nose, u = 1 is the tail end.
+const L = 25;      // length in metres
+const NOSE_Z = 11; // z of the nose tip. The whale faces +Z; u = 0 is the nose and u = 1 the tail.
 
 // Monotone cubic interpolation through [u, value] keys. It never overshoots, so the outline has no bumps.
 function curve(keys) {
@@ -70,7 +69,7 @@ function finPoint(spec) {
 const fluke = {
   span: 3.5,
   le: (t) => -2.35 * Math.pow(t, 1.5),
-  te: (t) => -1.5 - 0.52 * Math.sin(Math.min(t * 3, 1) * Math.PI * 0.5) - 0.4 * t + 0.02 * (t > 0.999 ? 1 : 0),
+  te: (t) => -1.5 - 0.52 * Math.sin(Math.min(t * 3, 1) * Math.PI * 0.5) - 0.4 * t,
   thick: (t) => 0.23 * Math.pow(1 - t, 0.8) + 0.004,
 };
 const flipper = {
@@ -86,7 +85,7 @@ const dorsal = {
   thick: (t) => 0.06 * (1 - t) + 0.003,
 };
 
-// Samples a parametric surface on a grid. Normals come from finite differences, so seams stay smooth.
+// Samples a parametric surface on a grid. Normals come from the surface function, not the mesh, so the duplicate seam vertices get the same normal.
 function sampleSurface(fn, nu, nv, flip) {
   const pos = [], nor = [], par = [], idx = [];
   const e = 1e-3;
@@ -122,7 +121,7 @@ function sampleSurface(fn, nu, nv, flip) {
 }
 
 function buildGeometry() {
-  const out = { pos: [], nor: [], uv: [], part: [], fin: [], idx: [] };
+  const out = { pos: [], nor: [], uv: [], part: [], span: [], idx: [] };
   const v3 = new THREE.Vector3();
   const add = (surf, part, matrix, mirror) => {
     const start = out.pos.length / 3;
@@ -137,7 +136,7 @@ function buildGeometry() {
       if (part === 0) out.uv.push(surf.par[i * 2], surf.par[i * 2 + 1]);
       else out.uv.push(-1, 0);
       out.part.push(part);
-      out.fin.push(part === 0 ? 0 : surf.par[i * 2]);
+      out.span.push(part === 0 ? 0 : surf.par[i * 2]);
     }
     for (let i = 0; i < surf.idx.length; i += 3) {
       const a = surf.idx[i] + start, b = surf.idx[i + 1] + start, c = surf.idx[i + 2] + start;
@@ -177,7 +176,7 @@ function buildGeometry() {
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(out.nor, 3));
   geo.setAttribute('aUV', new THREE.Float32BufferAttribute(out.uv, 2));
   geo.setAttribute('aPart', new THREE.Float32BufferAttribute(out.part, 1));
-  geo.setAttribute('aFin', new THREE.Float32BufferAttribute(out.fin, 1));
+  geo.setAttribute('aSpan', new THREE.Float32BufferAttribute(out.span, 1));
   geo.setIndex(out.idx);
   return geo;
 }
@@ -185,10 +184,10 @@ function buildGeometry() {
 const vertexShader = /* glsl */ `
 attribute vec2 aUV;
 attribute float aPart;
-attribute float aFin;
-uniform float uPhase;  // swim cycle
+attribute float aSpan;
+uniform float uSwimPhase;  // swim cycle
 uniform float uAmp;    // tail stroke size in metres
-uniform float uFlip;   // flipper cycle
+uniform float uFlipperPhase;   // flipper cycle
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec3 vRest;
@@ -205,7 +204,7 @@ float env(float s) { return 0.05 - 0.42 * s + 1.35 * s * s; }
 float denv(float s) { return -0.42 + 2.7 * s; }
 
 void bend(float s, out float lift, out float ang) {
-  float th = uPhase - WAVE * s;
+  float th = uSwimPhase - WAVE * s;
   lift = uAmp * env(s) * sin(th);
   float dlift = uAmp * (denv(s) * sin(th) - WAVE * env(s) * cos(th));
   ang = atan(-dlift / LEN);
@@ -219,7 +218,7 @@ void main() {
   vPart = aPart;
 
   if (aPart > 1.5 && aPart < 2.5) {
-    p.y += aFin * aFin * 0.5 * sin(uFlip + 0.6 * sign(p.x));
+    p.y += aSpan * aSpan * 0.5 * sin(uFlipperPhase + 0.6 * sign(p.x));
   }
 
   float s = (NOSE_Z - p.z) / LEN;
@@ -253,7 +252,6 @@ void main() {
 
 const fragmentShader = /* glsl */ `
 ${common}
-uniform sampler2D uNoise;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying vec3 vRest;
@@ -270,7 +268,7 @@ void main() {
   bool body = vPart < 0.5;
   float u = body ? vUV.x : (NOSE_Z - vRest.z) / LEN;
   float v = vUV.y;
-  float belly = body ? 1.0 - smoothstep(0.10, 0.30, abs(v - 0.5)) : smoothstep(0.1, -0.3, normalize(vNormal).y);
+  float belly = body ? 1.0 - smoothstep(0.10, 0.30, abs(v - 0.5)) : 1.0 - smoothstep(-0.3, 0.1, normalize(vNormal).y);
 
   // Blue whale skin is slate blue with paler mottling.
   vec2 muv = body ? vec2(u * 7.0, v * 4.0) : vRest.xz * 0.30 + vRest.y * 0.2;
@@ -291,8 +289,8 @@ void main() {
     float aa = 1.0 - smoothstep(0.20, 0.55, fwidth(q));
     float groove = zone * aa;
     vec3 around = normalize(cross(N, vAxis));
-    N = normalize(N + around * sin(q * 6.2832) * 0.42 * groove);
-    albedo *= 1.0 - 0.30 * groove * smoothstep(0.2, 1.0, -cos(q * 6.2832));
+    N = normalize(N + around * sin(q * TAU) * 0.42 * groove);
+    albedo *= 1.0 - 0.30 * groove * smoothstep(0.2, 1.0, -cos(q * TAU));
 
     // Mouth line and eye.
     float side = smoothstep(0.03, 0.10, abs(v - 0.5)) * smoothstep(0.03, 0.10, 0.5 - abs(v - 0.5));
@@ -302,11 +300,11 @@ void main() {
     albedo *= 1.0 - 0.6 * mouth;
     float eye = length(vec2((u - 0.226) * LEN, vRest.y + 0.30));
     albedo = mix(albedo, vec3(0.01, 0.012, 0.016), (1.0 - smoothstep(0.07, 0.11, eye)) * side);
-    albedo *= 1.0 + 0.25 * (smoothstep(0.24, 0.12, eye) - smoothstep(0.12, 0.10, eye)) * side;
+    albedo *= 1.0 + 0.25 * (smoothstep(0.10, 0.12, eye) - smoothstep(0.12, 0.24, eye)) * side;
   }
 
   float depth = -vWorld.y;
-  float ndl = dot(N, uSunDir);
+  float ndl = dot(N, uSunWater);
   float wrap = clamp((ndl + 0.30) / 1.30, 0.0, 1.0);
   float caustic = causticAt(vWorld);
   vec3 sun = sunAt(depth) * wrap * mix(1.0, caustic, 0.9 * smoothstep(-0.05, 0.35, ndl));
@@ -314,11 +312,11 @@ void main() {
   // Light scattered by the water arrives from everywhere, strongest from above.
   float skyward = N.y * 0.5 + 0.5;
   vec3 ambient = mix(vec3(0.010, 0.060, 0.110), vec3(0.060, 0.330, 0.470), skyward * skyward)
-               * exp(-vec3(0.060, 0.020, 0.014) * depth);
+               * exp(-AMBIENT_LOSS * depth);
 
   vec3 col = albedo * (sun * 1.25 + ambient * 1.5);
 
-  vec3 H = normalize(uSunDir + V);
+  vec3 H = normalize(uSunWater + V);
   float spec = pow(max(dot(N, H), 0.0), 48.0) * smoothstep(0.0, 0.2, ndl);
   col += sunAt(depth) * spec * 0.22 * (0.3 + caustic);
 
@@ -329,22 +327,18 @@ void main() {
 }
 `;
 
-let sharedGeometry = null;
-
-export function createWhale(shared, noiseTexture) {
-  sharedGeometry = sharedGeometry || buildGeometry();
+export function createWhale(shared) {
   const material = new THREE.ShaderMaterial({
     uniforms: {
       ...shared,
-      uNoise: { value: noiseTexture },
-      uPhase: { value: 0 },
+      uSwimPhase: { value: 0 },
       uAmp: { value: 1.4 },
-      uFlip: { value: 0 },
+      uFlipperPhase: { value: 0 },
     },
     vertexShader,
     fragmentShader,
   });
-  const mesh = new THREE.Mesh(sharedGeometry, material);
+  const mesh = new THREE.Mesh(buildGeometry(), material);
   mesh.frustumCulled = false;
   mesh.rotation.order = 'YXZ';
   return { mesh, uniforms: material.uniforms };

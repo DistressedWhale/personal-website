@@ -1,35 +1,37 @@
 import * as THREE from 'three';
 import { rng } from './noise.js';
 
-// Shipwreck models. Each function returns one geometry with position, normal and colour.
+// Shipwreck models. Each function returns one geometry with position, normal, colour and a texture coordinate in metres.
 // Local axes: +Z is the bow, +Y is up, and y = 0 is the sand.
 
-const WOOD = [0.150, 0.115, 0.085];
-const WOOD_PALE = [0.215, 0.175, 0.130];
-const WOOD_DARK = [0.085, 0.066, 0.050];
-const IRON = [0.060, 0.062, 0.068];
-const RUST = [0.190, 0.105, 0.070];
-const RUST_DARK = [0.105, 0.058, 0.042];
-const RUST_PALE = [0.270, 0.170, 0.110];
-const PAINT = [0.300, 0.300, 0.270];
-const ROPE = [0.170, 0.150, 0.105];
-const VOID = [0.008, 0.010, 0.013]; // an opening that shows the dark inside
+// Surface colours. The fourth number is the seam count per metre: planks for wood, plates for steel, 0 for none.
+const WOOD = [0.200, 0.150, 0.105, 2.5];
+const WOOD_PALE = [0.420, 0.360, 0.270, 2.5];
+const WOOD_DARK = [0.070, 0.055, 0.042, 2.5];
+const IRON = [0.040, 0.042, 0.048, 0];
+const RUST = [0.260, 0.130, 0.080, 0.6];
+const RUST_DARK = [0.100, 0.055, 0.040, 0.6];
+const RUST_PALE = [0.400, 0.250, 0.150, 0.6];
+const PAINT = [0.550, 0.550, 0.500, 0.6];
+const ROPE = [0.300, 0.270, 0.190, 0];
+const VOID = [0.008, 0.010, 0.013, 0]; // an opening that shows the dark inside
 
 const smooth = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
 const hash = (i, j) => { const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return s - Math.floor(s); };
-const shade = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+const shade = (c, k) => [c[0] * k, c[1] * k, c[2] * k, c[3]];
 const pose = (at = [0, 0, 0], rot = [0, 0, 0]) => new THREE.Matrix4().compose(
   new THREE.Vector3(...at), new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot, 'YXZ')), new THREE.Vector3(1, 1, 1));
 
 // Collects triangles from many parts into one geometry. `at` applies a transform to all parts made inside it.
 function makeBuilder() {
-  const pos = [], nor = [], col = [];
+  const pos = [], nor = [], col = [], uvs = [];
   let frame = new THREE.Matrix4();
+  let parts = 0;
   const p = new THREE.Vector3(), n = new THREE.Vector3();
-  const emit = (point, normal, color) => {
+  const emit = (point, normal, color, u, v) => {
     p.set(...point).applyMatrix4(frame);
     n.set(...normal).transformDirection(frame);
-    pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); col.push(...color);
+    pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); col.push(...color); uvs.push(u, v);
   };
   const b = {
     at(matrix, make) {
@@ -38,12 +40,20 @@ function makeBuilder() {
       make();
       frame = outer;
     },
-    // A three.js geometry, in one colour.
+    // A three.js geometry, in one colour. Each part gets its own tone, so that equal parts do not look identical.
     add(geometry, color, matrix) {
       const g = geometry.index ? geometry.toNonIndexed() : geometry;
       if (matrix) g.applyMatrix4(matrix);
       const gp = g.getAttribute('position').array, gn = g.getAttribute('normal').array;
-      for (let i = 0; i < gp.length; i += 3) emit([gp[i], gp[i + 1], gp[i + 2]], [gn[i], gn[i + 1], gn[i + 2]], color);
+      // The texture runs along the longest side of the part.
+      g.computeBoundingBox();
+      const size = g.boundingBox.getSize(new THREE.Vector3()).toArray();
+      const long = size.indexOf(Math.max(...size)), a1 = (long + 1) % 3, a2 = (long + 2) % 3;
+      const id = ++parts;
+      const toned = shade(color, 0.72 + 0.56 * hash(id, 17));
+      for (let i = 0; i < gp.length; i += 3) {
+        emit([gp[i], gp[i + 1], gp[i + 2]], [gn[i], gn[i + 1], gn[i + 2]], toned, gp[i + long] + id * 3.7, gp[i + a1] + gp[i + a2] + id * 1.3);
+      }
     },
     box(size, at, rot, color) { b.add(new THREE.BoxGeometry(...size), color, pose(at, rot)); },
     // A round bar between two points.
@@ -65,13 +75,32 @@ function makeBuilder() {
         const len = Math.hypot(x, y, z);
         return len > 1e-9 ? [x / len, y / len, z / len] : [0, 1, 0];
       };
+      // Size of the patch in metres, measured through its middle. The texture runs along the longer side.
+      const span = (from, to) => {
+        let sum = 0, last = fn(...from(0));
+        for (let k = 1; k <= 8; k++) {
+          const next = fn(...from(k / 8));
+          sum += Math.hypot(next[0] - last[0], next[1] - last[1], next[2] - last[2]);
+          last = next;
+        }
+        return sum;
+      };
+      const midU = (u[0] + u[1]) / 2, midV = (v[0] + v[1]) / 2;
+      const lenU = span((t) => [u[0] + (u[1] - u[0]) * t, midV]), lenV = span((t) => [midU, v[0] + (v[1] - v[0]) * t]);
+      const id = ++parts;
+      const texture = (i, j) => (lenU >= lenV
+        ? [(i / nu) * lenU + id * 3.7, (j / nv) * lenV + id * 1.3]
+        : [(j / nv) * lenV + id * 3.7, (i / nu) * lenU + id * 1.3]);
+      const grid = [[0, 0], [1, 0], [0, 1], [1, 1]];
       for (let i = 0; i < nu; i++) {
         for (let j = 0; j < nv; j++) {
           const mid = at(i + 0.5, j + 0.5);
           if (keep && !keep(i, j, mid[0], mid[1])) continue;
           const c = typeof color === 'function' ? color(i, j, mid[0], mid[1]) : color;
-          const corners = [at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)];
-          for (const k of [0, 1, 2, 1, 3, 2]) emit(fn(...corners[k]), normal(...corners[k]), c);
+          for (const k of [0, 1, 2, 1, 3, 2]) {
+            const corner = at(i + grid[k][0], j + grid[k][1]);
+            emit(fn(...corner), normal(...corner), c, ...texture(i + grid[k][0], j + grid[k][1]));
+          }
         }
       }
     },
@@ -79,7 +108,8 @@ function makeBuilder() {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
       geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-      geo.setAttribute('aColor', new THREE.Float32BufferAttribute(col, 3));
+      geo.setAttribute('aColor', new THREE.Float32BufferAttribute(col, 4));
+      geo.setAttribute('aUV', new THREE.Float32BufferAttribute(uvs, 2));
       return geo;
     },
   };

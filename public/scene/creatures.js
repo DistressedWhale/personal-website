@@ -3,14 +3,13 @@ import { common } from './glsl.js';
 import { rng } from './noise.js';
 
 const TAU = Math.PI * 2;
-const LOOP = 600; // seconds. Shader motion repeats exactly over this time, so the loop has no jump.
+const LOOP = 600; // seconds. Shader motion repeats exactly over this time, so the wrap shows no jump.
 
 // ---------------------------------------------------------------------------------------------
-// Pack fish: tuna and pilot fish share one body shape and one shader.
-// The mesh transform is the frame of the pack. Each fish holds a slot in that frame and wanders around it.
+// Pack fish: tuna and pilot fish share one body shape and one shader. Each fish holds a slot in the frame of the pack mesh and wanders around it.
 
 function spindleGeometry() {
-  // A unit-length fish that faces +Z: smooth body, crescent tail, dorsal fin and two pectoral fins.
+  // A fish about one unit long that faces +Z: smooth body, crescent tail, dorsal fin and two pectoral fins.
   const pos = [], nor = [], fin = [], idx = [];
   const RINGS = 11, SIDES = 10;
   const halfHeight = (t) => 0.135 * Math.pow(Math.sin(Math.PI * Math.pow(t, 0.72)), 0.85) + 0.004;
@@ -59,12 +58,12 @@ function createPack(shared, loop, { slots, look, seed }) {
   const vary = new Float32Array(count * 4);
   slots.forEach((s, i) => {
     slot.set([s.x, s.y, s.z], i * 3);
-    // phase, length in metres, wander distance in metres, whole wander cycles per loop
+    // phase, scale (about the length in metres), wander distance in metres, whole wander cycles per loop
     vary.set([rand() * TAU, s.size, s.wander, Math.round(34 + rand() * 40)], i * 4);
   });
   const geo = spindleGeometry();
   geo.setAttribute('aSlot', new THREE.InstancedBufferAttribute(slot, 3));
-  geo.setAttribute('aVar', new THREE.InstancedBufferAttribute(vary, 4));
+  geo.setAttribute('aVary', new THREE.InstancedBufferAttribute(vary, 4));
   geo.instanceCount = count;
 
   const material = new THREE.ShaderMaterial({
@@ -82,26 +81,27 @@ function createPack(shared, loop, { slots, look, seed }) {
     },
     vertexShader: /* glsl */ `
       attribute vec3 aSlot;
-      attribute vec4 aVar;
+      attribute vec4 aVary;
       attribute float aFin;
       uniform float uLoop, uBeat, uBeatAmp;
       varying vec3 vWorld;
       varying vec3 vNormal;
       varying vec3 vBody;
       varying float vFin;
+      const float TAU = 6.2831853;
       void main() {
-        float w = 6.2831853 / ${LOOP.toFixed(1)} * uLoop;
-        float c = aVar.w;
-        vec3 wander = aVar.z * vec3(sin(w * c + aVar.x),
-                                    0.6 * sin(w * (c + 3.0) + aVar.x * 1.7),
-                                    1.5 * sin(w * (c - 2.0) + aVar.x * 2.3));
+        float w = TAU / ${LOOP.toFixed(1)} * uLoop;
+        float c = aVary.w;
+        vec3 wander = aVary.z * vec3(sin(w * c + aVary.x),
+                                    0.6 * sin(w * (c + 3.0) + aVary.x * 1.7),
+                                    1.5 * sin(w * (c - 2.0) + aVary.x * 2.3));
         // The fish turns its nose toward the side it drifts to.
-        float yaw = 0.22 * cos(w * c + aVar.x) * min(aVar.z, 1.0);
+        float yaw = 0.22 * cos(w * c + aVary.x) * min(aVary.z, 1.0);
 
         vec3 p = position;
         vec3 n = normal;
-        float flex = smoothstep(0.30, -0.66, p.z);
-        float beat = sin(uBeat + aVar.x * 3.0 - p.z * 4.5);
+        float flex = 1.0 - smoothstep(-0.66, 0.30, p.z);
+        float beat = sin(uBeat + aVary.x * 3.0 - p.z * 4.5);
         p.x += beat * uBeatAmp * flex;
         n.z += beat * uBeatAmp * 3.0 * n.x * flex;
 
@@ -109,7 +109,7 @@ function createPack(shared, loop, { slots, look, seed }) {
         p = vec3(p.x * cy + p.z * sy, p.y, -p.x * sy + p.z * cy);
         n = vec3(n.x * cy + n.z * sy, n.y, -n.x * sy + n.z * cy);
 
-        vec4 world = modelMatrix * vec4(aSlot + wander + p * aVar.y, 1.0);
+        vec4 world = modelMatrix * vec4(aSlot + wander + p * aVary.y, 1.0);
         vWorld = world.xyz;
         vNormal = normalize(mat3(modelMatrix) * n);
         vBody = position;
@@ -132,10 +132,10 @@ function createPack(shared, loop, { slots, look, seed }) {
         // Dark back, pale belly. The split sits a little above the middle of the side.
         float side = smoothstep(-0.02, 0.07, vBody.y);
         vec3 albedo = mix(uBelly, uBack, side);
-        float bands = smoothstep(0.15, 0.55, sin(vBody.z * 6.2832 * uStripes + 1.2));
+        float bands = smoothstep(0.15, 0.55, sin(vBody.z * TAU * uStripes + 1.2));
         albedo = mix(albedo, uBack * 0.35, bands * step(0.5, uStripes) * 0.85);
         albedo = mix(albedo, uFin, vFin);
-        gl_FragColor = vec4(shadeSkin(albedo, N, V, vWorld, 30.0, uFlash * (1.0 - side * 0.7)), 1.0);
+        gl_FragColor = vec4(shadeSurface(albedo, N, V, vWorld, 30.0, uFlash * (1.0 - side * 0.7)), 1.0);
       }
     `,
   });
@@ -214,10 +214,10 @@ function mantaGeometry() {
   return geo;
 }
 
-function createManta(shared, noiseTexture, geometry) {
+function createManta(shared, geometry) {
   const material = new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
-    uniforms: { ...shared, uNoise: { value: noiseTexture }, uFlap: { value: 0 }, uFlapAmp: { value: 0.9 } },
+    uniforms: { ...shared, uFlap: { value: 0 }, uFlapAmp: { value: 0.85 } },
     vertexShader: /* glsl */ `
       attribute float aSpan;
       attribute float aTop;
@@ -246,7 +246,6 @@ function createManta(shared, noiseTexture, geometry) {
     `,
     fragmentShader: /* glsl */ `
       ${common}
-      uniform sampler2D uNoise;
       varying vec3 vWorld;
       varying vec3 vNormal;
       varying vec2 vUV;
@@ -264,7 +263,7 @@ function createManta(shared, noiseTexture, geometry) {
         float spots = smoothstep(0.62, 0.70, n) * (1.0 - smoothstep(0.5, 0.7, a));
         vec3 belly = mix(vec3(0.70, 0.76, 0.80), vec3(0.06, 0.08, 0.11), clamp(rim * 0.75 + spots * 0.7, 0.0, 1.0));
         vec3 albedo = vTop > 0.0 ? back : belly;
-        gl_FragColor = vec4(shadeSkin(albedo, N, V, vWorld, 20.0, 0.10), 1.0);
+        gl_FragColor = vec4(shadeSurface(albedo, N, V, vWorld, 20.0, 0.10), 1.0);
       }
     `,
   });
@@ -326,12 +325,12 @@ function createJellies(shared, loop, blooms, perBloom) {
   const vary = new Float32Array(count * 4);
   for (let i = 0; i < count; i++) {
     place.set([(rand() - 0.5) * 50, (rand() - 0.5) * 16, (rand() - 0.5) * 50, Math.floor(i / perBloom)], i * 4);
-    // phase, bell radius in metres, whole pulses per loop, tint
-    vary.set([rand() * TAU, 0.30 + rand() * rand() * 0.6, Math.round(150 + rand() * 110), rand()], i * 4);
+    // phase, bell radius in metres, pulses per loop, tint. The pulse count is even, because the tentacles sway at half the pulse rate.
+    vary.set([rand() * TAU, 0.30 + rand() * rand() * 0.6, 2 * Math.round(75 + rand() * 55), rand()], i * 4);
   }
   const geo = jellyGeometry();
   geo.setAttribute('aPlace', new THREE.InstancedBufferAttribute(place, 4));
-  geo.setAttribute('aVar', new THREE.InstancedBufferAttribute(vary, 4));
+  geo.setAttribute('aVary', new THREE.InstancedBufferAttribute(vary, 4));
   geo.instanceCount = count;
 
   const centers = [];
@@ -346,7 +345,7 @@ function createJellies(shared, loop, blooms, perBloom) {
       ${common}
       #define BLOOMS ${blooms}
       attribute float aBell, aHang, aAround;
-      attribute vec4 aPlace, aVar;
+      attribute vec4 aPlace, aVary;
       uniform float uLoop;
       uniform vec3 uBloom[BLOOMS];
       varying vec3 vColor;
@@ -354,8 +353,8 @@ function createJellies(shared, loop, blooms, perBloom) {
       varying vec3 vView;
       varying float vRibbon;
       void main() {
-        float w = 6.2831853 / ${LOOP.toFixed(1)} * uLoop;
-        float pulse = w * aVar.z + aVar.x;
+        float w = TAU / ${LOOP.toFixed(1)} * uLoop;
+        float pulse = w * aVary.z + aVary.x;
         // The bell snaps shut and opens slowly.
         float squeeze = pow(0.5 + 0.5 * sin(pulse), 2.5);
         float cs = cos(aAround), sn = sin(aAround);
@@ -376,16 +375,16 @@ function createJellies(shared, loop, blooms, perBloom) {
           n = normalize(vec3(cs * sin(phi), cos(phi) * 1.3, sn * sin(phi)));
         }
         // Each pulse pushes the animal up a little, then it sinks back.
-        vec3 world = uBloom[int(aPlace.w + 0.5)] + aPlace.xyz + p * aVar.y;
-        world.y += 0.22 * aVar.y * sin(pulse - 1.3);
+        vec3 world = uBloom[int(aPlace.w + 0.5)] + aPlace.xyz + p * aVary.y;
+        world.y += 0.22 * aVary.y * sin(pulse - 1.3);
         world.y = min(world.y, -1.5);
 
         vec3 toEye = cameraPosition - world;
         float dist = length(toEye);
         float depth = -world.y;
         vec3 light = sunAt(depth) * (0.25 + 0.75 * causticAt(world))
-                   + vec3(0.03, 0.16, 0.24) * exp(-vec3(0.06, 0.02, 0.014) * depth);
-        vec3 tint = mix(vec3(0.55, 0.80, 1.00), vec3(1.00, 0.62, 0.78), aVar.w * aVar.w);
+                   + vec3(0.03, 0.16, 0.24) * exp(-AMBIENT_LOSS * depth);
+        vec3 tint = mix(vec3(0.55, 0.80, 1.00), vec3(1.00, 0.62, 0.78), aVary.w * aVary.w);
         vColor = tint * light * exp(-EXT * dist) * smoothstep(3.0, 9.0, dist);
         vNormal = n;
         vView = toEye / dist;
@@ -414,7 +413,7 @@ function createJellies(shared, loop, blooms, perBloom) {
 
 // ---------------------------------------------------------------------------------------------
 
-export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
+export function createCreatures(shared, whaleMesh, prey) {
   const rand = rng(1234);
   const range = (a, b) => a + rand() * (b - a);
   const group = new THREE.Group();
@@ -434,7 +433,7 @@ export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
     }
     const pack = createPack(shared, loop, { slots, look: tunaLook, seed: 500 + k });
     group.add(pack.mesh);
-    return { ...pack, pos: new THREE.Vector3(0, -20, 9999), heading: 0, speed: 7, wait: 6 + k * 38, beat: 0, weave: range(0, TAU), level: -15, target: null };
+    return { ...pack, pos: new THREE.Vector3(0, -20, 9999), heading: 0, speed: 7, wait: 6 + k * 38, beat: 0, weave: range(0, TAU), target: null };
   });
 
   // Pilot fish: small striped fish that hold station around the head of the whale.
@@ -463,7 +462,7 @@ export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
   // Manta rays: slow gliders that the whale catches up with and passes.
   const mantaGeo = mantaGeometry();
   const mantas = [0, 1, 2].map((k) => {
-    const m = createManta(shared, noiseTexture, mantaGeo);
+    const m = createManta(shared, mantaGeo);
     group.add(m.mesh);
     return { ...m, flap: range(0, TAU), speed: 1.9, turn: range(0, TAU), rate: range(0.035, 0.06), heading: 0, scale: 1 };
   });
@@ -494,8 +493,7 @@ export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
   const launchTuna = (t, whaleY) => {
     const side = rand() < 0.5 ? -1 : 1;
     t.pos.set(side * range(11, 34), 0, range(-150, -125));
-    t.level = THREE.MathUtils.clamp(whaleY + range(-9, 7), -40, -7);
-    t.pos.y = t.level;
+    t.pos.y = THREE.MathUtils.clamp(whaleY + range(-9, 7), -40, -7);
     t.heading = -side * range(0, 0.10);
     t.speed = range(6.4, 8.6);
     // Pick a bait ball that is still ahead and hunt it.
@@ -581,7 +579,6 @@ export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
         // Wings beat faster on the way up than on a level glide.
         m.flap = (m.flap + dt * TAU * (0.20 + 0.10 * Math.max(climb, 0) / 0.18)) % TAU;
         m.uniforms.uFlap.value = m.flap;
-        m.uniforms.uFlapAmp.value = 0.85 * m.scale;
         if (p.z < -130 || Math.abs(p.x) > 150) {
           const lead = k === 1 ? mantas[0] : null;
           if (lead && lead.mesh.position.z > 60) placeManta(m, 0, lead);
@@ -590,7 +587,7 @@ export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
       });
 
       tuna.forEach((t, k) => {
-        for (const end of [0, 1]) {
+        for (let end = 0; end < 2; end++) {
           const spot = threats[k * 2 + end];
           const along = end ? 6 : -6;
           spot.x = t.pos.x + Math.sin(t.heading) * along;

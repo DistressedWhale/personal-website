@@ -12,14 +12,14 @@ model files.
 
 | File | Content |
 | --- | --- |
-| `public/scene/main.js` | Renderer, whale motion, camera path and drag control, light shaft pass |
+| `public/scene/main.js` | Renderer, whale motion, camera path and drag control, light shaft pass, adaptive render scale |
 | `public/scene/whale.js` | Whale shape, swim bend, skin shader |
 | `public/scene/ocean.js` | Wave textures, sea surface, backdrop, drifting specks |
 | `public/scene/fish.js` | Sardine schools, simulated as boids |
 | `public/scene/creatures.js` | Tuna packs, pilot fish, manta rays, jellyfish |
 | `public/scene/seafloor.js` | Sand floor, whale shadow, placement of the shipwrecks |
 | `public/scene/wrecks.js` | Shipwreck models: a wooden sailing ship and a steamer broken in two |
-| `public/scene/glsl.js` | Water colour, fog and caustic code shared by all shaders |
+| `public/scene/glsl.js` | Water colour, fog, caustics, sea floor height and the shared lighting function |
 | `public/scene/noise.js` | Seeded random numbers and the tileable noise texture |
 | `public/vendor/three/` | three.js r187, bundled to one minified file with esbuild |
 
@@ -27,9 +27,9 @@ The scene has no end. JavaScript keeps time in double precision and wraps each
 value before it goes to a shader, so the picture does not degrade over days.
 
 Address parameters fix one view for checks: `?t=120` sets the start time in
-seconds, `?az=0.5&el=0.2&dist=40` fix the camera angle and distance, and
-`?rays=0` turns the light shafts off, and `?focus=` points the camera at
-something other than the whale: `tuna`, `manta`, `jelly`, `ball`,
+seconds, `?az=0.5&el=0.2&dist=40` fix the camera angle and distance, `?rays=0`
+turns the light shafts off, `?still` freezes time, and `?focus=` points the
+camera at something other than the whale: `tuna`, `manta`, `jelly`, `ball`,
 `roam`, `split`, `stream`, `wreck` or `wreck2`.
 
 A drag with the left mouse button, or one finger, turns the camera around the

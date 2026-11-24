@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { common } from './glsl.js';
+import { common, NOISE_SIZE } from './glsl.js';
 import { makeNoiseTexture } from './noise.js';
 import { createOcean } from './ocean.js';
 import { createWhale } from './whale.js';
@@ -8,13 +8,14 @@ import { createCreatures } from './creatures.js';
 import { createSeafloor } from './seafloor.js';
 
 const TAU = Math.PI * 2;
+// 23040 m is the least common multiple of the 512 m terrain tile and the 90 m speck box, so the wrap is invisible.
+const TRAVEL_WRAP = 23040;
 const canvas = document.getElementById('scene');
 const query = new URLSearchParams(location.search);
-const num = (key) => (query.has(key) ? parseFloat(query.get(key)) : null);
+const num = (key) => { const v = parseFloat(query.get(key)); return Number.isFinite(v) ? v : null; };
 
 function start() {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-  if (!renderer.capabilities.isWebGL2) throw new Error('WebGL2 is required');
   renderer.autoClear = false;
 
   // Sun above the water, a little ahead of the whale. Refraction makes the light steeper under water.
@@ -27,31 +28,29 @@ function start() {
   const shared = {
     uWaveTex: { value: null },
     uSwellTex: { value: null },
-    uSunDir: { value: sunWater },
+    uSunWater: { value: sunWater },
     uSunAir: { value: sunAir },
     uTravel: { value: new THREE.Vector2() },
     uCamDepth: { value: 15 },
-    uTerrain: { value: null },
+    uNoise: { value: makeNoiseTexture(NOISE_SIZE, 7) },
   };
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(46, 1, 0.5, 1500);
-  const noise = makeNoiseTexture(256, 7);
-  shared.uTerrain.value = noise;
 
   const ocean = createOcean(shared);
   scene.add(ocean.group);
 
-  const whale = createWhale(shared, noise);
+  const whale = createWhale(shared);
   scene.add(whale.mesh);
 
   const fish = createFish(shared);
   scene.add(fish.mesh);
 
-  const creatures = createCreatures(shared, noise, whale.mesh, fish.prey);
+  const creatures = createCreatures(shared, whale.mesh, fish.prey);
   scene.add(creatures.group);
 
-  const seafloor = createSeafloor(shared, noise);
+  const seafloor = createSeafloor(shared);
   scene.add(seafloor.group);
 
   // The scene renders to a float target. A second pass adds the light shafts and maps the result to the screen.
@@ -60,8 +59,6 @@ function start() {
     samples: 4,
     depthTexture: new THREE.DepthTexture(4, 4),
   });
-  target.depthTexture.type = THREE.UnsignedIntType;
-  target.texture.minFilter = target.texture.magFilter = THREE.LinearFilter;
 
   const post = new THREE.ShaderMaterial({
     depthTest: false,
@@ -117,14 +114,16 @@ function start() {
         if (dir.y > 0.0) reach = min(reach, uCamDepth / dir.y);
 
         // March along the view ray and add the sunlight that the water scatters toward the eye.
+        // The post pass has its own camera, so cameraPosition is not the eye here.
+        vec3 eye = uCamWorld[3].xyz;
         float jitter = hash(gl_FragCoord.xy + uFrame * 7.13);
-        // Steps grow with distance. Near water gets fine steps, far water gets coarse ones.
         vec3 shafts = vec3(0.0);
+        // Samples sit at reach * f * f, so near water gets fine steps and far water gets coarse ones.
         for (int i = 0; i < STEPS; i++) {
           float f = (float(i) + jitter) / float(STEPS);
           float t = reach * f * f;
           float stepLen = reach * 2.0 * f / float(STEPS);
-          vec3 p = cameraPosition + dir * t;
+          vec3 p = eye + dir * t;
           float depth = max(-p.y, 0.0);
           vec2 sp = surfacePoint(p);
           float swell = textureLod(uSwellTex, sp / SWELL_TILE, 2.2).r;
@@ -133,9 +132,9 @@ function start() {
           beam *= sqrt(beam + 0.05);
           shafts += beam * sunAt(depth) * exp(-EXT * t) * stepLen;
         }
-        float toSun = max(dot(dir, uSunDir), 0.0);
+        float toSun = max(dot(dir, uSunWater), 0.0);
         float phase = 0.11 + 0.75 * pow(toSun, 3.0) + 0.9 * pow(toSun, 14.0);
-        col += shafts * phase * uRays * vec3(0.0060, 0.0150, 0.0190);
+        col += shafts * phase * uRays * vec3(0.0072, 0.0180, 0.0228);
 
         col = tonemap(col * 1.35);
         col = pow(col, vec3(1.0 / 2.2));
@@ -220,7 +219,9 @@ function start() {
   const velocity = new THREE.Vector3();
   const lookAt = new THREE.Vector3();
   let last = performance.now();
-  let slow = 0, fast = 0;
+  let slow = 0, slowTime = 0, fast = 0;
+  let trial = null;     // a scale drop under test
+  let adaptive = true;
 
   function update(dt) {
     // Stroke and glide: the whale beats its tail hard for a while, then eases off.
@@ -229,27 +230,25 @@ function start() {
     swimPhase = (swimPhase + dt * TAU * (0.13 + 0.10 * effort)) % TAU;
     flipPhase = (flipPhase + dt * 0.45) % TAU;
 
-    const depth = -17 + 6.5 * Math.sin(time * 0.027) + 3.0 * Math.sin(time * 0.0113 + 2.0);
+    const whaleY = -17 + 6.5 * Math.sin(time * 0.027) + 3.0 * Math.sin(time * 0.0113 + 2.0);
     const climb = 6.5 * 0.027 * Math.cos(time * 0.027) + 3.0 * 0.0113 * Math.cos(time * 0.0113 + 2.0);
     const yaw = 0.16 * Math.sin(time * 0.019) + 0.08 * Math.sin(time * 0.043 + 0.7);
     const yawRate = 0.16 * 0.019 * Math.cos(time * 0.019) + 0.08 * 0.043 * Math.cos(time * 0.043 + 0.7);
 
     // The body rocks against the tail stroke.
     const recoil = Math.sin(swimPhase - 0.9) * effort;
-    whale.mesh.position.set(0, depth + 0.10 * recoil, 0);
+    whale.mesh.position.set(0, whaleY + 0.10 * recoil, 0);
     whale.mesh.rotation.set(-(Math.atan2(climb, speed) * 1.6 + 0.018 * recoil), yaw, -yawRate * 22 + 0.03 * Math.sin(time * 0.07));
-    whale.uniforms.uPhase.value = swimPhase;
+    whale.uniforms.uSwimPhase.value = swimPhase;
     whale.uniforms.uAmp.value = 0.75 + 0.95 * effort;
-    whale.uniforms.uFlip.value = flipPhase;
+    whale.uniforms.uFlipperPhase.value = flipPhase;
 
     velocity.set(Math.sin(yaw) * speed, 0, Math.cos(yaw) * speed);
     travel.addScaledVector(velocity, dt);
-    // Each wrap length is a whole number of pattern repeats, so the wrap is invisible.
-    travel.x %= 23040;
-    travel.z %= 23040;
+    travel.x %= TRAVEL_WRAP;
+    travel.z %= TRAVEL_WRAP;
     shared.uTravel.value.set(travel.x % 512, travel.z % 512);
 
-    // Chase camera. It drifts around the rear of the whale and never settles.
     creatures.update(time, dt, velocity);
     fish.update(time, dt, velocity, creatures.threats, whale.mesh);
 
@@ -265,6 +264,7 @@ function start() {
         drag.el *= ease;
       }
     }
+    // Chase camera. It drifts around the rear of the whale and never settles.
     // On a tall screen a side view cuts the whale off, so the camera stays closer to the rear.
     const tall = camera.aspect < 1;
     const pathAz = fixed.az ?? (1.05 * Math.sin(time * 0.0310 + 0.9) + 0.70 * Math.sin(time * 0.0173 + 1.3)) * (tall ? 0.28 : 1);
@@ -274,9 +274,9 @@ function start() {
     const el = THREE.MathUtils.clamp(pathEl - pointerSmooth.y * 0.15 + drag.el, -1.35, 1.35);
     drag.el = THREE.MathUtils.clamp(drag.el, -1.35 - pathEl, 1.35 - pathEl);
     const dist = (fixed.dist ?? 35 + 7 * Math.sin(time * 0.0170 + 2.0) + 4 * Math.sin(time * 0.0071)) * (tall ? 1.45 : 1);
-    lookAt.set(Math.sin(yaw) * 3, depth + 0.5, Math.cos(yaw) * 3);
-    if (focus && creatures.targets[focus]) lookAt.copy(creatures.targets[focus]());
-    if (focus && fish.targets[focus]) lookAt.copy(fish.targets[focus]());
+    lookAt.set(Math.sin(yaw) * 3, whaleY + 0.5, Math.cos(yaw) * 3);
+    if (focus && Object.hasOwn(creatures.targets, focus)) lookAt.copy(creatures.targets[focus]());
+    if (focus && Object.hasOwn(fish.targets, focus)) lookAt.copy(fish.targets[focus]());
     if (focus === 'wreck') lookAt.copy(seafloor.target(0));
     if (focus === 'wreck2') lookAt.copy(seafloor.target(1));
     camera.position.set(
@@ -292,8 +292,8 @@ function start() {
   }
 
   function render() {
-    const pixels = targetHeight / (2 * Math.tan((camera.fov * Math.PI) / 360));
-    ocean.update(renderer, time, camera, travel, pixels);
+    const focalPx = targetHeight / (2 * Math.tan((camera.fov * Math.PI) / 360));
+    ocean.update(renderer, time, camera, travel, focalPx);
     renderer.setRenderTarget(target);
     renderer.clear();
     renderer.render(scene, camera);
@@ -311,9 +311,23 @@ function start() {
     update(dt);
     render();
 
-    if (raw > 1 / 40) { slow++; fast = 0; } else if (raw < 1 / 57) { fast++; slow = 0; }
-    if (slow > 40 && scale > 0.5) { scale = Math.max(0.5, scale * 0.85); slow = 0; resize(); }
-    if (fast > 600 && scale < 1) { scale = Math.min(1, scale / 0.9); fast = 0; resize(); }
+    if (adaptive && trial) {
+      trial.time += raw;
+      if (++trial.frames === 60) {
+        // If a lower scale does not shorten the frames, the GPU is not the limit. Go back to full scale and stop adapting.
+        if (trial.time / 60 > trial.before * 0.93) { scale = 1; adaptive = false; resize(); }
+        trial = null;
+      }
+    } else if (adaptive) {
+      if (raw > 1 / 40) { slow++; slowTime += raw; fast = 0; } else if (raw < 1 / 57) { fast++; slow = 0; slowTime = 0; }
+      if (slow > 40 && scale > 0.5) {
+        trial = { before: slowTime / slow, time: 0, frames: 0 };
+        scale = Math.max(0.5, scale * 0.85);
+        slow = 0; slowTime = 0;
+        resize();
+      }
+      if (fast > 600 && scale < 1) { scale = Math.min(1, scale / 0.9); fast = 0; resize(); }
+    }
     requestAnimationFrame(tick);
   }
 

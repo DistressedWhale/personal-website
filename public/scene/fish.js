@@ -2,15 +2,8 @@ import * as THREE from 'three';
 import { common } from './glsl.js';
 import { rng } from './noise.js';
 
-// Sardine schools, simulated as boids. Each fish steers by three local rules: keep clear of close
-// neighbours, match their heading, and stay with them. Each school adds one rule for its pattern,
-// and every fish flees from large animals. No fish follows a scripted path.
-//
-// Patterns:
-//   ball   - a bait ball that turns about its upright axis
-//   roam   - a loose school that chases a wandering point, so its shape keeps changing
-//   split  - like roam, but with two points that drift apart and back, so the school divides and rejoins
-//   stream - a long ribbon on a steady course
+// Sardine schools, simulated as boids: keep clear, match heading, stay together. Each school adds one rule
+// for its pattern, and every fish flees from large animals.
 
 const TAU = Math.PI * 2;
 const SCHOOLS = [
@@ -24,9 +17,13 @@ const TOTAL = SCHOOLS.reduce((n, s) => n + s.count, 0);
 
 const SEE = 1.35;       // metres. A fish reacts to neighbours inside this distance.
 const CLEAR = 0.62;     // metres. Closer than this, neighbours push apart.
-const MAX_PUSH = 18;    // metres per second squared
+const MAX_FORCE = 18;   // metres per second squared
 const BUCKETS = 4096;
 const ENOUGH = 26;      // a fish stops counting neighbours here, which bounds the cost of a dense clump
+
+// The 27 grid cells around a fish, with its own cell first.
+const CELLS = [0, 0, 0];
+for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) if (x || y || z) CELLS.push(x, y, z);
 
 function fishGeometry() {
   // A flat diamond body with a tail fin. The fish faces +Z.
@@ -60,13 +57,14 @@ export function createFish(shared) {
   // Positions are relative to the anchor of the school. Velocities are relative to the water.
   const pos = new Float32Array(TOTAL * 3);
   const vel = new Float32Array(TOTAL * 3);
-  const info = new Float32Array(TOTAL * 3);   // school index, length in metres, tail phase
-  const social = new Float32Array(TOTAL * 3); // push from the neighbour rules, refreshed every second frame
+  const info = new Float32Array(TOTAL * 3);   // school index, scale (about the length in metres), tail phase
+  const social = new Float32Array(TOTAL * 3); // force from the neighbour rules, refreshed every second frame
   const panic = new Float32Array(TOTAL);
   const bucketOf = new Uint16Array(TOTAL);
   const bucketStart = new Uint32Array(BUCKETS + 1);
   const bucketFill = new Uint32Array(BUCKETS);
   const order = new Uint32Array(TOTAL);
+  const scanned = new Int32Array(27);
 
   const anchors = [];
   const schools = [];
@@ -75,7 +73,7 @@ export function createFish(shared) {
     const school = {
       ...def, index, first, end: first + def.count,
       anchor: new THREE.Vector3(), drift: new THREE.Vector3(),
-      spin: rand() < 0.5 ? -1 : 1, breathe: range(0, TAU), heading: 0, wander: range(0, TAU),
+      spin: rand() < 0.5 ? -1 : 1, breathe: range(0, TAU), heading: 0, wanderPhase: range(0, TAU),
     };
     if (def.kind === 'ball') { school.radius = 0.62 * Math.cbrt(def.count); school.cruise = 1.5; }
     if (def.kind === 'roam' || def.kind === 'split') {
@@ -94,7 +92,7 @@ export function createFish(shared) {
       } else if (def.kind === 'roam' || def.kind === 'split') {
         const r = 5 * Math.cbrt(rand()), a = rand() * TAU, c = rand() * 2 - 1, s = Math.sqrt(1 - c * c);
         x = r * s * Math.cos(a); y = r * c * 0.6; z = r * s * Math.sin(a);
-        vx = Math.cos(school.wander); vz = Math.sin(school.wander);
+        vx = Math.cos(school.wanderPhase); vz = Math.sin(school.wanderPhase);
       } else {
         const r = school.radius * Math.sqrt(rand()), b = rand() * TAU;
         x = r * Math.cos(b); y = r * Math.sin(b) * 0.7; z = range(-school.half, school.half);
@@ -172,14 +170,14 @@ export function createFish(shared) {
         float depth = -vWorld.y;
         // Silver sides with a dark back, like sardines.
         vec3 albedo = mix(vec3(0.50, 0.62, 0.68), vec3(0.05, 0.10, 0.16), smoothstep(0.2, 0.9, N.y));
-        float ndl = dot(N, uSunDir);
+        float ndl = dot(N, uSunWater);
         float caustic = causticAt(vWorld);
         vec3 sun = sunAt(depth) * clamp((ndl + 0.4) / 1.4, 0.0, 1.0) * mix(1.0, caustic, 0.7);
         vec3 ambient = mix(vec3(0.012, 0.07, 0.12), vec3(0.06, 0.33, 0.47), N.y * 0.5 + 0.5)
-                     * exp(-vec3(0.06, 0.02, 0.014) * depth);
+                     * exp(-AMBIENT_LOSS * depth);
         vec3 col = albedo * (sun * 1.4 + ambient * 1.6);
         // Scales flash when a side catches the sun.
-        vec3 H = normalize(uSunDir + V);
+        vec3 H = normalize(uSunWater + V);
         col += sunAt(depth) * pow(max(dot(N, H), 0.0), 24.0) * 1.6 * (0.4 + caustic);
         gl_FragColor = vec4(fogged(col, vWorld), 1.0);
       }
@@ -210,15 +208,22 @@ export function createFish(shared) {
       const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
       const cx = Math.floor(x / SEE), cy = Math.floor(y / SEE), cz = Math.floor(z / SEE);
       let n = 0, sx = 0, sy = 0, sz = 0, mx = 0, my = 0, mz = 0, ax = 0, ay = 0, az = 0;
-      scan: for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
-        const b = bucket(cx + dx, cy + dy, cz + dz);
+      // The cells after the first start at a different place for each fish and frame. A scan that stops early then has no fixed lean.
+      const turn = (i + frame) % 26;
+      scan: for (let c = 0; c < 27; c++) {
+        const o = c === 0 ? 0 : (1 + ((c - 1 + turn) % 26)) * 3;
+        const b = bucket(cx + CELLS[o], cy + CELLS[o + 1], cz + CELLS[o + 2]);
+        // Two cells can share a bucket. Scan each bucket once.
+        let repeat = false;
+        for (let q = 0; q < c; q++) if (scanned[q] === b) { repeat = true; break; }
+        scanned[c] = b;
+        if (repeat) continue;
         for (let k = bucketStart[b], e = bucketStart[b + 1]; k < e; k++) {
           const j = order[k];
-          stats.tests++;
           if (j === i) continue;
           const ox = x - pos[j * 3], oy = y - pos[j * 3 + 1], oz = z - pos[j * 3 + 2];
           const d2 = ox * ox + oy * oy + oz * oz;
-          // Written so that a broken (not-a-number) distance fails the test.
+          // The negated test also rejects a NaN distance.
           if (!(d2 <= see2 && d2 > 1e-8)) continue;
           n++;
           sx += pos[j * 3]; sy += pos[j * 3 + 1]; sz += pos[j * 3 + 2];
@@ -242,15 +247,16 @@ export function createFish(shared) {
     }
   }
 
-  // Counters for performance checks.
-  const stats = { pairs: 0, tests: 0, repaired: 0 };
+  // Counters for the performance test, which reads them through window.__scene.
+  const stats = { pairs: 0, repaired: 0 };
 
   const local = []; // threats in the frame of the current school: x, y, z, radius
   let frame = 0;
-  let seed = 12345;
-  const jitter = () => { seed = (Math.imul(seed, 1664525) + 1013904223) | 0; return seed / 2147483648; };
+  let jitterState = 12345;
+  const jitter = () => { jitterState = (Math.imul(jitterState, 1664525) + 1013904223) | 0; return jitterState / 2147483648; };
 
-  function step(s, dt, time, threats, flow) {
+  // `dt` is the simulation step. `frameTime` is the real frame time, which moves the water past the whale.
+  function step(s, dt, frameTime, time, threats, velocity) {
     if ((frame + s.index) % 2 === 0) socialForces(s);
 
     local.length = 0;
@@ -263,14 +269,14 @@ export function createFish(shared) {
     // The frame of the school moves with its anchor. A stream anchor travels with the fish.
     let dirX = 0, dirZ = 1;
     if (s.kind === 'stream') {
-      s.wander += dt * 0.11;
-      const a = s.heading + 0.22 * Math.sin(s.wander);
+      s.wanderPhase += dt * 0.11;
+      const a = s.heading + 0.22 * Math.sin(s.wanderPhase);
       dirX = Math.sin(a); dirZ = Math.cos(a);
-      s.drift.set(dirX * s.cruise, 0.25 * Math.sin(s.wander * 0.7), dirZ * s.cruise);
+      s.drift.set(dirX * s.cruise, 0.25 * Math.sin(s.wanderPhase * 0.7), dirZ * s.cruise);
     }
-    const ball = s.kind === 'ball' ? s.radius * (1 + 0.14 * Math.sin(time * 0.45 + s.breathe)) : 0;
+    const ballRadius = s.kind === 'ball' ? s.radius * (1 + 0.14 * Math.sin(time * 0.45 + s.breathe)) : 0;
     if (s.points) {
-      // The point wanders on a path that never repeats exactly. Its top speed stays below the cruise speed.
+      // The point wanders on a path that never repeats exactly. Its top speed is close to the cruise speed, so the school can keep up.
       const f = s.phase;
       const x = 11 * Math.sin(time * 0.097 + f[0]) + 5 * Math.sin(time * 0.213 + f[1]);
       const y = 4 * Math.sin(time * 0.071 + f[2]);
@@ -296,14 +302,14 @@ export function createFish(shared) {
       if (s.kind === 'ball') {
         // Bait ball: stay inside a sphere and circle slowly around its upright axis.
         const d = Math.hypot(x, y, z) + 1e-5;
-        const pull = d > ball ? Math.min((d - ball) * 1.8, 7) + 0.2 : 0.2 * (d / ball);
+        const pull = d > ballRadius ? Math.min((d - ballRadius) * 1.8, 7) + 0.2 : 0.2 * (d / ballRadius);
         fx -= (x / d) * pull; fy -= (y / d) * pull * 1.3; fz -= (z / d) * pull;
         const rho = Math.hypot(x, z) + 1e-5;
-        const turn = 0.6 * Math.min(rho / ball, 1);
+        const turn = 0.6 * Math.min(rho / ballRadius, 1);
         fx += (-z / rho * s.spin * s.cruise - vx) * turn;
         fz += (x / rho * s.spin * s.cruise - vz) * turn;
       } else if (s.points) {
-        // Roam: swim toward the nearest wandering point. Close to it there is no pull, so the fish mill freely.
+        // Roam: swim toward the nearest wandering point. Close to it only a weak pull is left, so the fish mill freely.
         let px = s.points[0].x, py = s.points[0].y, pz = s.points[0].z;
         let d = Math.hypot(px - x, py - y, pz - z);
         if (s.points.length > 1) {
@@ -334,11 +340,11 @@ export function createFish(shared) {
         const ox = x - local[t], oy = y - local[t + 1], oz = z - local[t + 2];
         const d2 = ox * ox + oy * oy + oz * oz, r = local[t + 3];
         if (d2 < r * r) {
-          // The small offset can lift d above r. Without the clamp, near goes negative and its square root is not a number.
+          // The small offset can lift d above r. Without the clamp, near goes negative and its square root is NaN.
           const d = Math.sqrt(d2) + 1e-5, near = Math.max(0, 1 - d / r);
-          const push = 26 * near * Math.sqrt(near) / d;
-          fx += ox * push; fy += oy * push; fz += oz * push;
-          if (near > panic[i]) panic[i] = Math.min(1, near * 1.5);
+          const force = 26 * near * Math.sqrt(near) / d;
+          fx += ox * force; fy += oy * force; fz += oz * force;
+          panic[i] = Math.max(panic[i], Math.min(1, near * 1.5));
         }
       }
 
@@ -348,8 +354,8 @@ export function createFish(shared) {
       if (worldY < -62) fy += (-62 - worldY) * 4;
 
       fx += jitter() * 0.7; fy += jitter() * 0.5; fz += jitter() * 0.7;
-      const push = Math.hypot(fx, fy, fz);
-      if (push > MAX_PUSH) { const c = MAX_PUSH / push; fx *= c; fy *= c; fz *= c; }
+      const size = Math.hypot(fx, fy, fz);
+      if (size > MAX_FORCE) { const c = MAX_FORCE / size; fx *= c; fy *= c; fz *= c; }
 
       vx += fx * dt; vy += fy * dt; vz += fz * dt;
       // A calm fish holds its cruise speed. A frightened fish sprints.
@@ -360,7 +366,7 @@ export function createFish(shared) {
       vx *= scale; vy *= scale; vz *= scale;
       panic[i] *= Math.exp(-dt * 1.1);
 
-      // Safety net: a fish with a broken value would spread it to its neighbours. Put it back at the centre.
+      // A non-finite value would spread to the neighbours through the averages. Reset the fish to the school centre.
       if (!Number.isFinite(vx + vy + vz + x + y + z)) {
         pos[k] = 0; pos[k + 1] = 0; pos[k + 2] = 0;
         vel[k] = 0; vel[k + 1] = 0; vel[k + 2] = s.cruise;
@@ -377,14 +383,17 @@ export function createFish(shared) {
       info[k + 2] = (info[k + 2] + dt * (5 + 5.5 * next)) % TAU;
     }
 
-    s.anchor.x += (s.drift.x - flow.x) * dt;
+    s.anchor.x += s.drift.x * dt - velocity.x * frameTime;
     s.anchor.y = THREE.MathUtils.clamp(s.anchor.y + s.drift.y * dt, -42, -8);
-    s.anchor.z += (s.drift.z - flow.z) * dt;
+    s.anchor.z += s.drift.z * dt - velocity.z * frameTime;
     if (s.anchor.z < -140 || s.anchor.z > 230 || Math.abs(s.anchor.x) > 150) place(s, false);
   }
 
   const all = [];
-  const roamView = new THREE.Vector3();
+  // The first school of each pattern, for the test views.
+  const byKind = {};
+  for (const s of schools) byKind[s.kind] ??= s;
+  const focusPoint = new THREE.Vector3();
   const BODY = [8, 0.5, -8];
   const whaleSpots = BODY.map(() => ({ x: 0, y: 0, z: 0, r: 5.6 }));
   return {
@@ -395,25 +404,27 @@ export function createFish(shared) {
     // Bait balls, for hunters to aim at.
     prey: schools.filter((s) => s.kind === 'ball').map((s) => s.anchor),
     targets: {
-      ball: () => schools[0].anchor,
-      roam: () => roamView.copy(schools[2].anchor).add(schools[2].points[0]),
-      split: () => roamView.copy(schools[3].points[0]).add(schools[3].points[1]).multiplyScalar(0.5).add(schools[3].anchor),
-      stream: () => schools[4].anchor,
+      ball: () => byKind.ball.anchor,
+      roam: () => focusPoint.copy(byKind.roam.anchor).add(byKind.roam.points[0]),
+      split: () => focusPoint.copy(byKind.split.points[0]).add(byKind.split.points[1]).multiplyScalar(0.5).add(byKind.split.anchor),
+      stream: () => byKind.stream.anchor,
     },
-    // `flow` is the velocity of the whale. `threats` lists animals to flee from as { x, y, z, r }.
-    update(time, dt, flow, threats, whaleMesh) {
+    // `velocity` is the velocity of the whale. `threats` lists animals to flee from as { x, y, z, r }.
+    update(time, dt, velocity, threats, whaleMesh) {
       frame++;
       // The whale counts as three spheres along its body.
       const sy = Math.sin(whaleMesh.rotation.y), cy = Math.cos(whaleMesh.rotation.y);
-      BODY.forEach((along, i) => {
-        whaleSpots[i].x = whaleMesh.position.x + sy * along;
+      for (let i = 0; i < BODY.length; i++) {
+        whaleSpots[i].x = whaleMesh.position.x + sy * BODY[i];
         whaleSpots[i].y = whaleMesh.position.y;
-        whaleSpots[i].z = whaleMesh.position.z + cy * along;
-      });
+        whaleSpots[i].z = whaleMesh.position.z + cy * BODY[i];
+      }
       all.length = 0;
-      all.push(...whaleSpots, ...threats);
+      for (const spot of whaleSpots) all.push(spot);
+      for (const threat of threats) all.push(threat);
+      // A long frame takes a short simulation step, so the rules stay stable.
       const h = Math.min(dt, 1 / 30);
-      if (h > 0) for (const s of schools) step(s, h, time, all, flow);
+      if (h > 0) for (const s of schools) step(s, h, dt, time, all, velocity);
       posAttr.needsUpdate = true;
       velAttr.needsUpdate = true;
       infoAttr.needsUpdate = true;

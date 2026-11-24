@@ -8,7 +8,7 @@ const WAVES = 14;
 // One wave field: a sum of sine waves that repeats exactly over `tile` metres.
 // The shader writes the caustic brightness, the height gradient and the height to a texture each frame.
 class WaveField {
-  constructor({ tile, size, minCycles, maxCycles, steepness, focus, speed, wind, seed }) {
+  constructor({ tile, size, minCycles, maxCycles, steepness, focalDepth, speed, wind, seed }) {
     const rand = rng(seed);
     this.speed = speed;
     this.omega = [];
@@ -44,7 +44,7 @@ class WaveField {
         uWaves: { value: waves },
         uPhase: { value: this.phases },
         uTile: { value: tile },
-        uFocus: { value: focus },
+        uFocalDepth: { value: focalDepth },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -55,7 +55,7 @@ class WaveField {
         uniform vec3 uWaves[WAVES];
         uniform float uPhase[WAVES];
         uniform float uTile;
-        uniform float uFocus;
+        uniform float uFocalDepth;
         varying vec2 vUv;
         void main() {
           vec2 x = vUv * uTile;
@@ -72,8 +72,8 @@ class WaveField {
             hxz -= a * k.x * k.y * s;
             hzz -= a * k.y * k.y * s;
           }
-          // Refraction moves each ray sideways by focus * gradient. Light piles up where that map folds.
-          float det = (1.0 - uFocus * hxx) * (1.0 - uFocus * hzz) - uFocus * uFocus * hxz * hxz;
+          // Refraction moves each ray sideways by focalDepth * gradient. Light piles up where that map folds.
+          float det = (1.0 - uFocalDepth * hxx) * (1.0 - uFocalDepth * hzz) - uFocalDepth * uFocalDepth * hxz * hxz;
           float caustic = 1.0 / max(abs(det), 0.16);
           gl_FragColor = vec4(caustic, g, h);
         }
@@ -82,7 +82,7 @@ class WaveField {
   }
 
   update(renderer, quad, time) {
-    // The phases are wrapped in double precision, so the pattern never loses precision.
+    // JavaScript wraps the phases in double precision, so the float uniforms stay small after any run time.
     for (let i = 0; i < WAVES; i++) {
       this.phases[i] = (this.phase0[i] + this.omega[i] * this.speed * time) % TAU;
     }
@@ -95,11 +95,11 @@ class WaveField {
 export function createOcean(shared) {
   const fine = new WaveField({
     tile: FINE_TILE, size: 512, minCycles: 5, maxCycles: 22,
-    steepness: 0.034, focus: 5.0, speed: 0.55, wind: 0.9, seed: 11,
+    steepness: 0.034, focalDepth: 5.0, speed: 0.55, wind: 0.9, seed: 11,
   });
   const swell = new WaveField({
     tile: SWELL_TILE, size: 256, minCycles: 4, maxCycles: 15,
-    steepness: 0.040, focus: 9.0, speed: 0.6, wind: 0.5, seed: 29,
+    steepness: 0.040, focalDepth: 9.0, speed: 0.6, wind: 0.5, seed: 29,
   });
   shared.uWaveTex.value = fine.target.texture;
   shared.uSwellTex.value = swell.target.texture;
@@ -149,7 +149,7 @@ export function createOcean(shared) {
     surfaceGeo,
     new THREE.ShaderMaterial({
       side: THREE.DoubleSide,
-      uniforms: { ...shared, uSunAir: { value: shared.uSunAir.value } },
+      uniforms: { ...shared },
       vertexShader: /* glsl */ `
         varying vec3 vWorld;
         void main() {
@@ -223,7 +223,7 @@ export function createOcean(shared) {
         ...shared,
         uBox: { value: BOX },
         uShift: { value: new THREE.Vector3() },
-        uPixels: { value: 1000 },
+        uFocalPx: { value: 1000 },
         uSway: { value: 0 },
       },
       vertexShader: /* glsl */ `
@@ -231,19 +231,19 @@ export function createOcean(shared) {
         attribute vec2 aSeed;
         uniform float uBox;
         uniform vec3 uShift;
-        uniform float uPixels;
+        uniform float uFocalPx;
         uniform float uSway;
         varying float vAlpha;
         varying vec3 vTint;
         void main() {
           vec3 rel = mod(position - uShift - cameraPosition, uBox) - 0.5 * uBox;
-          rel.y += 0.25 * sin(uSway + aSeed.x * 6.2832);
-          rel.x += 0.20 * sin(uSway * 2.0 + aSeed.y * 6.2832);
+          rel.y += 0.25 * sin(uSway + aSeed.x * TAU);
+          rel.x += 0.20 * sin(uSway * 2.0 + aSeed.y * TAU);
           vec3 world = cameraPosition + rel;
           vec4 mv = viewMatrix * vec4(world, 1.0);
           float d = length(rel);
           float size = mix(0.018, 0.075, aSeed.x * aSeed.x);
-          gl_PointSize = clamp(size * uPixels / max(-mv.z, 0.1), 1.0, 26.0);
+          gl_PointSize = clamp(size * uFocalPx / max(-mv.z, 0.1), 1.0, 26.0);
           gl_Position = projectionMatrix * mv;
           float edge = 1.0 - smoothstep(0.34 * uBox, 0.5 * uBox, max(abs(rel.x), max(abs(rel.y), abs(rel.z))));
           float near = smoothstep(0.6, 3.5, d);
@@ -258,7 +258,7 @@ export function createOcean(shared) {
         varying vec3 vTint;
         void main() {
           vec2 c = gl_PointCoord - 0.5;
-          float a = smoothstep(0.5, 0.05, length(c));
+          float a = 1.0 - smoothstep(0.05, 0.5, length(c));
           gl_FragColor = vec4(vTint * a * a * vAlpha * 0.55, 1.0);
         }
       `,
@@ -270,14 +270,13 @@ export function createOcean(shared) {
 
   return {
     group,
-    box: BOX,
-    update(renderer, time, camera, travel, pixels) {
+    update(renderer, time, camera, travel, focalPx) {
       fine.update(renderer, quad, time);
       swell.update(renderer, quad, time);
       surface.position.set(camera.position.x, 0, camera.position.z);
       const u = specks.material.uniforms;
       u.uShift.value.set(travel.x % BOX, 0, travel.z % BOX);
-      u.uPixels.value = pixels;
+      u.uFocalPx.value = focalPx;
       u.uSway.value = (time * 0.35) % TAU;
     },
   };
