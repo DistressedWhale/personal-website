@@ -4,6 +4,35 @@ Source of cetaceous.dev.
 
 The site is static. All served files live in `public/`.
 
+## Home page
+
+The home page is a three.js scene: a blue whale that swims through open ocean,
+followed by a chase camera. Code draws everything. The site holds no image or
+model files.
+
+| File | Content |
+| --- | --- |
+| `public/scene/main.js` | Renderer, whale motion, camera path, light shaft pass |
+| `public/scene/whale.js` | Whale shape, swim bend, skin shader |
+| `public/scene/ocean.js` | Wave textures, sea surface, backdrop, drifting specks |
+| `public/scene/fish.js` | Fish schools |
+| `public/scene/glsl.js` | Water colour, fog and caustic code shared by all shaders |
+| `public/scene/noise.js` | Seeded random numbers and the tileable noise texture |
+| `public/vendor/three/` | three.js r187, bundled to one minified file with esbuild |
+
+The scene has no end. JavaScript keeps time in double precision and wraps each
+value before it goes to a shader, so the picture does not degrade over days.
+
+Address parameters fix one view for checks: `?t=120` sets the start time in
+seconds, `?az=0.5&el=0.2&dist=40` fix the camera angle and distance, and
+`?rays=0` turns the light shafts off.
+
+To update three.js, download the `three` package and run, in its `build` folder:
+
+```sh
+npx esbuild three.module.js --bundle --minify --format=esm --outfile=three.module.min.js
+```
+
 ## Cloudflare Worker
 
 `wrangler.jsonc` defines a Worker with static assets and no script. Cloudflare
