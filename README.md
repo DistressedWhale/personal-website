@@ -12,16 +12,25 @@ model files.
 
 | File | Content |
 | --- | --- |
-| `public/scene/main.js` | Renderer, whale motion, camera path and drag control, light shaft pass, adaptive render scale |
-| `public/scene/whale.js` | Whale shape, swim bend, skin shader |
+| `public/scene/main.js` | Start-up and the frame loop: creates every part and updates them in order |
+| `public/scene/glsl.js` | Shader code shared by all materials: water colour, fog, caustics, sea floor height, lighting |
+| `public/scene/util.js` | Small helpers: seeded random numbers, geometry and mesh makers, the full-screen quad |
+| `public/scene/noise.js` | The tileable noise texture |
+| `public/scene/camera.js` | Chase camera: its path, the mouse nudge and the drag control |
+| `public/scene/post.js` | Light shaft pass, tone mapping, and the adaptive render scale |
 | `public/scene/ocean.js` | Wave textures, sea surface, backdrop, drifting specks |
+| `public/scene/whale.js` | Whale shape, swim bend, skin shader, and the whale's motion |
 | `public/scene/fish.js` | Sardine schools, simulated as boids |
-| `public/scene/creatures.js` | Tuna packs, pilot fish, manta rays, jellyfish |
-| `public/scene/seafloor.js` | Sand floor, whale shadow, placement of the shipwrecks |
+| `public/scene/packs.js` | Tuna packs and pilot fish, which share one body and shader |
+| `public/scene/manta.js` | Manta rays |
+| `public/scene/jelly.js` | Jellyfish blooms |
+| `public/scene/seafloor.js` | Sand floor, whale shadow, wreck material and placement |
 | `public/scene/wrecks.js` | Shipwreck models: a wooden sailing ship and a steamer broken in two |
-| `public/scene/glsl.js` | Water colour, fog, caustics, sea floor height and the shared lighting function |
-| `public/scene/noise.js` | Seeded random numbers and the tileable noise texture |
+| `public/scene/builder.js` | Model builder that the wrecks use: boxes, bars, curved patches |
 | `public/vendor/three/` | three.js r187, bundled to one minified file with esbuild |
+
+Each part is a `create...` function that returns an object with an `update` method. `main.js` is the only
+file that knows all the parts, so it is the place to start reading.
 
 The scene has no end. JavaScript keeps time in double precision and wraps each
 value before it goes to a shader, so the picture does not degrade over days.

@@ -1,7 +1,7 @@
-import * as THREE from 'three';
-import { rng } from './noise.js';
+import { TAU, rng } from './util.js';
+import { makeBuilder, pose, hash, shade, smooth, raised } from './builder.js';
 
-// Shipwreck models. Each function returns one geometry with position, normal, colour and a texture coordinate in metres.
+// Shipwreck models: a wooden sailing ship and a steamer that broke in two.
 // Local axes: +Z is the bow, +Y is up, +X is port, and y = 0 is the sand.
 
 // Surface colours. The fourth number is the seam count per metre: planks for wood, plates for steel, 0 for none, -1 for an opening.
@@ -15,119 +15,6 @@ const RUST_PALE = [0.400, 0.250, 0.150, 0.6];
 const PAINT = [0.550, 0.550, 0.500, 0.6];
 const ROPE = [0.300, 0.270, 0.190, 0];
 const VOID = [0.008, 0.010, 0.013, -1]; // an opening that shows the dark inside
-
-const smooth = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
-const hash = (i, j) => { const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return s - Math.floor(s); };
-const shade = (c, k) => [c[0] * k, c[1] * k, c[2] * k, c[3]];
-const pose = (at = [0, 0, 0], rot = [0, 0, 0]) => new THREE.Matrix4().compose(
-  new THREE.Vector3(...at), new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot, 'YXZ')), new THREE.Vector3(1, 1, 1));
-
-// Collects triangles from many parts into one geometry. `within` applies a transform to all parts made inside it.
-// `section` does the same for a piece of hull, which stays rigid. Other parts follow the dune under them.
-function makeBuilder() {
-  const pos = [], nor = [], col = [], uvs = [];
-  let transform = new THREE.Matrix4();
-  let rigid = 0;
-  let parts = 0;
-  const p = new THREE.Vector3(), n = new THREE.Vector3();
-  const emit = (point, normal, color, u, v) => {
-    p.set(...point).applyMatrix4(transform);
-    n.set(...normal).transformDirection(transform);
-    pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); col.push(...color); uvs.push(u, v, rigid);
-  };
-  const b = {
-    within(matrix, make) {
-      const outer = transform;
-      transform = outer.clone().multiply(matrix);
-      make();
-      transform = outer;
-    },
-    section(matrix, make) {
-      rigid = 1;
-      b.within(matrix, make);
-      rigid = 0;
-    },
-    // A three.js geometry, in one colour. Each part gets its own tone, so that equal parts do not look identical.
-    add(geometry, color, matrix = new THREE.Matrix4()) {
-      const g = geometry.index ? geometry.toNonIndexed() : geometry;
-      const gp = g.getAttribute('position').array, gn = g.getAttribute('normal').array;
-      // The texture runs along the longest side of the part, in its own frame.
-      g.computeBoundingBox();
-      const size = g.boundingBox.getSize(new THREE.Vector3()).toArray();
-      const long = size.indexOf(Math.max(...size)), a1 = (long + 1) % 3, a2 = (long + 2) % 3;
-      const id = ++parts;
-      const toned = shade(color, 0.72 + 0.56 * hash(id, 17));
-      b.within(matrix, () => {
-        for (let i = 0; i < gp.length; i += 3) {
-          emit([gp[i], gp[i + 1], gp[i + 2]], [gn[i], gn[i + 1], gn[i + 2]], toned, gp[i + long] + id * 3.7, gp[i + a1] + gp[i + a2] + id * 1.3);
-        }
-      });
-    },
-    box(size, at, rot, color) { b.add(new THREE.BoxGeometry(...size), color, pose(at, rot)); },
-    // A round bar between two points.
-    spar(from, to, r0, color, r1 = r0 * 0.8, sides = 7) {
-      const a = new THREE.Vector3(...from), c = new THREE.Vector3(...to);
-      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), c.clone().sub(a).normalize());
-      const m = new THREE.Matrix4().compose(a.clone().add(c).multiplyScalar(0.5), q, new THREE.Vector3(1, 1, 1));
-      b.add(new THREE.CylinderGeometry(r1, r0, a.distanceTo(c), sides, 1), color, m);
-    },
-    // A bar that follows a list of points.
-    line(points, r, color) { for (let i = 0; i < points.length - 1; i++) b.spar(points[i], points[i + 1], r, color, r, 5); },
-    // A curved surface fn(u, v). Cells for which `keep` returns false are left out, which makes holes. `color` may be a function of the cell.
-    patch(fn, { u = [0, 1], v = [0, 1], nu, nv, keep, color }) {
-      const at = (i, j) => [u[0] + (u[1] - u[0]) * i / nu, v[0] + (v[1] - v[0]) * j / nv];
-      const cross = (uu, vv) => {
-        const e = 1e-3, a = fn(uu + e, vv), c = fn(uu - e, vv), d = fn(uu, vv + e), f = fn(uu, vv - e);
-        const du = [a[0] - c[0], a[1] - c[1], a[2] - c[2]], dv = [d[0] - f[0], d[1] - f[1], d[2] - f[2]];
-        const x = du[1] * dv[2] - du[2] * dv[1], y = du[2] * dv[0] - du[0] * dv[2], z = du[0] * dv[1] - du[1] * dv[0];
-        return [x, y, z, Math.hypot(x, y, z)];
-      };
-      const midU = (u[0] + u[1]) / 2, midV = (v[0] + v[1]) / 2;
-      const normal = (uu, vv) => {
-        let c = cross(uu, vv);
-        // Where the patch shrinks to a point, take the normal from just inside it.
-        if (c[3] < 1e-9) c = cross(uu + (midU - uu) * 0.01, vv + (midV - vv) * 0.01);
-        return c[3] > 1e-9 ? [c[0] / c[3], c[1] / c[3], c[2] / c[3]] : [0, 1, 0];
-      };
-      // Size of the patch in metres, measured through its middle. The texture runs along the longer side.
-      const arcLength = (from) => {
-        let sum = 0, last = fn(...from(0));
-        for (let k = 1; k <= 8; k++) {
-          const next = fn(...from(k / 8));
-          sum += Math.hypot(next[0] - last[0], next[1] - last[1], next[2] - last[2]);
-          last = next;
-        }
-        return sum;
-      };
-      const lenU = arcLength((t) => [u[0] + (u[1] - u[0]) * t, midV]), lenV = arcLength((t) => [midU, v[0] + (v[1] - v[0]) * t]);
-      const id = ++parts;
-      const texCoord = (i, j) => (lenU >= lenV
-        ? [(i / nu) * lenU + id * 3.7, (j / nv) * lenV + id * 1.3]
-        : [(j / nv) * lenV + id * 3.7, (i / nu) * lenU + id * 1.3]);
-      const corners = [[0, 0], [1, 0], [0, 1], [1, 1]];
-      for (let i = 0; i < nu; i++) {
-        for (let j = 0; j < nv; j++) {
-          const mid = at(i + 0.5, j + 0.5);
-          if (keep && !keep(i, j, mid[0], mid[1])) continue;
-          const c = typeof color === 'function' ? color(i, j, mid[0], mid[1]) : color;
-          for (const k of [0, 1, 2, 1, 3, 2]) {
-            const corner = at(i + corners[k][0], j + corners[k][1]);
-            emit(fn(...corner), normal(...corner), c, ...texCoord(i + corners[k][0], j + corners[k][1]));
-          }
-        }
-      }
-    },
-    build() {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-      geo.setAttribute('aColor', new THREE.Float32BufferAttribute(col, 4));
-      geo.setAttribute('aUV', new THREE.Float32BufferAttribute(uvs, 3)); // texture coordinate in metres, then the rigid flag
-      return geo;
-    },
-  };
-  return b;
-}
 
 // Hull surface. u runs from stern to bow. v runs from the starboard rail, under the keel, to the port rail.
 function hullShape({ length, beam, breadth, depth, sheer, flare, bilge }) {
@@ -145,8 +32,8 @@ function hullShape({ length, beam, breadth, depth, sheer, flare, bilge }) {
 // Loose objects that lie on the sand around a wreck, at random angles.
 function scatter(b, rand, count, near, far, make) {
   for (let i = 0; i < count; i++) {
-    const a = rand() * Math.PI * 2, r = near + (far - near) * rand();
-    b.within(pose([Math.cos(a) * r * 0.6, 0, Math.sin(a) * r], [0, rand() * Math.PI * 2, 0]), () => make(i));
+    const a = rand() * TAU, r = near + (far - near) * rand();
+    b.within(pose([Math.cos(a) * r * 0.6, 0, Math.sin(a) * r], [0, rand() * TAU, 0]), () => make(i));
   }
 }
 
@@ -159,8 +46,9 @@ function anchor(b, size, color) {
   b.spar([0, 0.12, -1.5 * size], [0, 0.12, 1.5 * size], 0.09 * size, color, 0.075 * size);
   b.spar([-1.1 * size, 0.12, 1.4 * size], [1.1 * size, 0.12, 1.4 * size], 0.07 * size, color);   // stock
   for (const side of [-1, 1]) {
-    b.line([[0, 0.12, -1.5 * size], [0.35 * size, 0.45 * size * side, -1.35 * size], [0.6 * size, 0.85 * size * side, -0.95 * size]], 0.075 * size, color);
-    b.box([0.07 * size, 0.42 * size, 0.42 * size], [0.62 * size, 0.88 * size * side, -0.9 * size], [0.5 * side, 0, 0.6], color);
+    const arm = [[0, 0.12, -1.5 * size], [0.35 * size, 0.45 * size * side, -1.35 * size], [0.6 * size, 0.85 * size * side, -0.95 * size]];
+    b.line(arm, 0.075 * size, color);
+    b.box([0.07 * size, 0.42 * size, 0.42 * size], [0.62 * size, 0.88 * size * side, -0.9 * size], color, [0.5 * side, 0, 0.6]);
   }
 }
 
@@ -198,21 +86,21 @@ export function sailingShip() {
         v: [0.5 - 0.30 - 0.20 * hash(k, 1), 0.5 + 0.30 + 0.20 * hash(k, 2)], nu: 1, nv: 12, color: WOOD_DARK,
       });
     }
-    b.box([0.55, 0.65, L * 0.9], [0, 0.4 - D * 0.985, -0.6], [0, 0, 0], WOOD_DARK); // keel
+    b.box([0.55, 0.65, L * 0.9], [0, 0.4 - D * 0.985, -0.6], WOOD_DARK); // keel
     const stem = [];
     for (let u = 0.80; u <= 1.0001; u += 0.04) stem.push(hull(Math.min(u, 0.999), 0.5, 1.02));
     stem.push([0, spec.sheer(1) + 1.6, z(1) + 0.5]);
     b.line(stem, 0.3, WOOD_DARK);
     b.spar([0, 0.4 - D * 0.7, z(0.005)], [0, spec.sheer(0) + 0.3, z(0) - 0.35], 0.3, WOOD_DARK);
-    b.box([0.22, 4.4, 1.9], [0.5, -2.4, z(0) - 1.2], [0.5, 0, 0], WOOD);              // rudder, swung over
+    b.box([0.22, 4.4, 1.9], [0.5, -2.4, z(0) - 1.2], WOOD, [0.5, 0, 0]);              // rudder, swung over
 
     // Flat stern with a row of cabin windows.
     b.patch((s, t) => { const e = hull(0.012, s); return [e[0] * (1 - t), e[1] + (spec.sheer(0) - 0.1 - e[1]) * t, e[2]]; }, {
       nu: 12, nv: 4, keep: (i, j) => hash(i + 7, j + 3) > 0.14, color: (i, j) => shade(WOOD, 0.85 + 0.3 * hash(i, j + 9)),
     });
-    for (let k = -2; k <= 2; k++) b.box([0.62, 0.8, 0.08], [k * 0.95, 1.25, z(0.012) - 0.06], [0, 0, 0], VOID);
-    b.box([5.4, 0.16, 0.3], [0, 0.72, z(0.012) - 0.12], [0, 0, 0], WOOD_PALE);
-    b.box([5.4, 0.16, 0.3], [0, 1.78, z(0.012) - 0.12], [0, 0, 0], WOOD_PALE);
+    for (let k = -2; k <= 2; k++) b.box([0.62, 0.8, 0.08], [k * 0.95, 1.25, z(0.012) - 0.06], VOID);
+    b.box([5.4, 0.16, 0.3], [0, 0.72, z(0.012) - 0.12], WOOD_PALE);
+    b.box([5.4, 0.16, 0.3], [0, 1.78, z(0.012) - 0.12], WOOD_PALE);
 
     // Decks. `gone` is the share of planks that have fallen in.
     const deck = (u0, u1, y, gone, hatch) => {
@@ -222,15 +110,15 @@ export function sailingShip() {
           && !(hatch && Math.abs(u - hatch) < 0.04 && Math.abs(w - 0.5) < 0.17),
         color: (i, j) => shade(WOOD_PALE, 0.75 + 0.4 * hash(Math.floor(i / 4), j + 20)),
       });
-      for (let u = u0 + 0.01; u < u1; u += 2.1 / L) b.box([half(u) * 1.86, 0.22, 0.24], [0, y - 0.14, z(u)], [0, 0, 0], WOOD_DARK);
+      for (let u = u0 + 0.01; u < u1; u += 2.1 / L) b.box([half(u) * 1.86, 0.22, 0.24], [0, y - 0.14, z(u)], WOOD_DARK);
     };
     deck(0.31, 0.80, MAIN, 0.30, 0.56);
     deck(0.03, 0.30, QUARTER, 0.38);
     deck(0.81, 0.965, FORE, 0.26);
     // Coaming around the main hatch.
     for (const s of [-1, 1]) {
-      b.box([0.16, 0.4, 2.9], [s * 1.45, MAIN + 0.2, z(0.56)], [0, 0, 0], WOOD_DARK);
-      b.box([3.05, 0.4, 0.16], [0, MAIN + 0.2, z(0.56) + s * 1.45], [0, 0, 0], WOOD_DARK);
+      b.box([0.16, 0.4, 2.9], [s * 1.45, MAIN + 0.2, z(0.56)], WOOD_DARK);
+      b.box([3.05, 0.4, 0.16], [0, MAIN + 0.2, z(0.56) + s * 1.45], WOOD_DARK);
     }
     // Walls at the breaks between decks, each with a door.
     const wall = (u, y0, y1) => {
@@ -248,8 +136,8 @@ export function sailingShip() {
         if (hash(i, side + 60) < 0.36) continue;
         const u0 = 0.03 + i * 0.036, u1 = u0 + 0.036;
         const a = hull(u0, side), c = hull(u1, side);
-        b.spar([a[0], a[1] + 0.85, a[2]], [c[0], c[1] + 0.85, c[2]], 0.09, WOOD_PALE, 0.09, 5);
-        b.spar(a, [a[0], a[1] + 0.85, a[2]], 0.07, WOOD, 0.07, 5);
+        b.spar(raised(a, 0.85), raised(c, 0.85), 0.09, WOOD_PALE, 0.09, 5);
+        b.spar(a, raised(a, 0.85), 0.07, WOOD, 0.07, 5);
       }
     }
 
@@ -257,27 +145,27 @@ export function sailingShip() {
     const foot = [0, 0.4 - D * 0.9, z(0.53)], top = [0.5, 11.2, z(0.52)], peak = [0.75, 15.6, z(0.515)];
     b.spar(foot, top, 0.42, WOOD, 0.33, 9);
     b.spar(top, peak, 0.27, WOOD, 0.20, 7);
-    b.add(new THREE.CylinderGeometry(1.25, 1.15, 0.16, 10), WOOD_PALE, pose([top[0], top[1], top[2]], [0, 0, 0]));
+    b.cylinder([1.25, 1.15], 0.16, 10, WOOD_PALE, top);
     b.spar([-5.6, 9.6, z(0.535)], [4.9, 6.3, z(0.50)], 0.19, WOOD, 0.14);
     // What is left of the standing rigging.
     for (const side of [-1, 1]) {
       for (let k = 0; k < 3; k++) {
         if (hash(k, side + 5) < 0.3) continue;
         const u = 0.47 + k * 0.035, e = hull(u, side < 0 ? 0 : 1);
-        b.spar([e[0], e[1] + 0.6, e[2]], [top[0] + side * 1.05, top[1], top[2] - 0.3 + k * 0.3], 0.04, ROPE, 0.04, 4);
+        b.spar(raised(e, 0.6), [top[0] + side * 1.05, top[1], top[2] - 0.3 + k * 0.3], 0.04, ROPE, 0.04, 4);
       }
     }
     b.spar([0, FORE - 0.2, z(0.80)], [0.3, FORE + 3.4, z(0.795)], 0.36, WOOD, 0.30, 8);   // stump of the fore mast
     b.spar([0, QUARTER - 0.2, z(0.19)], [-0.2, QUARTER + 1.9, z(0.19)], 0.30, WOOD, 0.26, 8); // stump of the mizzen
     b.spar([0, FORE + 0.5, z(0.955)], [0.5, FORE + 3.8, z(0.955) + 7.2], 0.26, WOOD, 0.15);   // bowsprit
-    b.add(new THREE.CylinderGeometry(0.55, 0.62, 0.9, 9), WOOD_DARK, pose([0, FORE + 0.45, z(0.87)])); // capstan
+    b.cylinder([0.55, 0.62], 0.9, 9, WOOD_DARK, [0, FORE + 0.45, z(0.87)]); // capstan
 
     // Guns still on the main deck. The carriages slid to the low side.
     for (const u of [0.37, 0.45, 0.63, 0.71]) {
       for (const side of [-1, 1]) {
         if (hash(Math.round(u * 100), side) < 0.25) continue;
         const x = side * half(u) * 0.62 + 0.7;
-        b.box([0.8, 0.35, 1.2], [x, MAIN + 0.2, z(u)], [0, 0.2 * side, 0], WOOD_DARK);
+        b.box([0.8, 0.35, 1.2], [x, MAIN + 0.2, z(u)], WOOD_DARK, [0, 0.2 * side, 0]);
         b.spar([x - side * 0.9, MAIN + 0.55, z(u)], [x + side * 1.2, MAIN + 0.62, z(u) + 0.2], 0.23, IRON, 0.15, 8);
       }
     }
@@ -289,9 +177,11 @@ export function sailingShip() {
   b.spar([3.4, 1.3, z(0.20)], [14.0, 0.22, z(0.20) - 9.0], 0.27, WOOD, 0.17, 8);
   b.within(pose([-7.5, 0, z(0.97) + 4.5], [0, 0.7, 0]), () => anchor(b, 1.0, IRON));
   scatter(b, rand, 4, 6, 12, () => b.spar([0, 0.16, -1.0], [0, 0.20, 1.1], 0.23, IRON, 0.15, 8));
-  scatter(b, rand, 7, 5, 14, () => b.add(new THREE.CylinderGeometry(0.34, 0.34, 0.9, 9), WOOD_PALE, pose([0, 0.26, 0], [0, 0, Math.PI / 2])));
-  scatter(b, rand, 4, 6, 13, (i) => b.box([0.9, 0.8, 1.0], [0, 0.22, 0], [0.12 * i, 0, 0.1], WOOD));
-  scatter(b, rand, 18, 5, 17, (i) => b.box([0.26, 0.07, 2.2 + (i % 4) * 0.6], [0, 0.05, 0], [0.03, 0, 0], shade(WOOD_PALE, 0.8 + 0.05 * (i % 5))));
+  scatter(b, rand, 7, 5, 14, () => b.cylinder([0.34, 0.34], 0.9, 9, WOOD_PALE, [0, 0.26, 0], [0, 0, Math.PI / 2]));
+  scatter(b, rand, 4, 6, 13, (i) => b.box([0.9, 0.8, 1.0], [0, 0.22, 0], WOOD, [0.12 * i, 0, 0.1]));
+  scatter(b, rand, 18, 5, 17, (i) => {
+    b.box([0.26, 0.07, 2.2 + (i % 4) * 0.6], [0, 0.05, 0], shade(WOOD_PALE, 0.8 + 0.05 * (i % 5)), [0.03, 0, 0]);
+  });
   return b.build();
 }
 
@@ -301,7 +191,8 @@ export function steamer() {
   const L = 62, B = 11, D = 7.5;
   const spec = {
     length: L, beam: B, flare: 0.42, bilge: 0.45,
-    breadth: (u) => Math.min(1, Math.pow(Math.max(u, 0) / 0.2, 0.5)) * (u > 0.72 ? Math.pow(Math.max(1 - Math.pow((u - 0.72) / 0.28, 2.3), 0), 0.7) : 1),
+    breadth: (u) => Math.min(1, Math.pow(Math.max(u, 0) / 0.2, 0.5))
+      * (u > 0.72 ? Math.pow(Math.max(1 - Math.pow((u - 0.72) / 0.28, 2.3), 0), 0.7) : 1),
     depth: (u) => D * (0.55 + 0.45 * smooth(0, 0.2, u)),
     sheer: (u) => 0.25 + 1.1 * Math.pow((u - 0.5) * 2, 2) * (u > 0.5 ? 1 : 0.6),
   };
@@ -320,24 +211,24 @@ export function steamer() {
   const railing = (points, height = 1.0) => {
     for (let i = 0; i < points.length - 1; i++) {
       const a = points[i], c = points[i + 1];
-      b.spar(a, [a[0], a[1] + height, a[2]], 0.045, IRON, 0.045, 4);
+      b.spar(a, raised(a, height), 0.045, IRON, 0.045, 4);
       if (hash(i, Math.round(a[2] * 3)) < 0.22) continue;
-      for (const h of [0.5, 1.0]) b.spar([a[0], a[1] + height * h, a[2]], [c[0], c[1] + height * h, c[2]], 0.035, IRON, 0.035, 4);
+      for (const h of [0.5, 1.0]) b.spar(raised(a, height * h), raised(c, height * h), 0.035, IRON, 0.035, 4);
     }
     const end = points[points.length - 1];
-    b.spar(end, [end[0], end[1] + height, end[2]], 0.045, IRON, 0.045, 4);
+    b.spar(end, raised(end, height), 0.045, IRON, 0.045, 4);
   };
   // A vent with its mouth turned forward.
   const cowl = (x, y, zz) => {
     b.spar([x, y, zz], [x, y + 1.9, zz], 0.26, RUST_PALE, 0.26, 8);
     b.spar([x, y + 1.75, zz - 0.05], [x, y + 2.15, zz + 0.6], 0.36, RUST_PALE, 0.46, 9);
-    b.add(new THREE.CircleGeometry(0.4, 9), VOID, pose([x, y + 2.16, zz + 0.61], [-0.6, 0, 0]));
+    b.disc(0.4, 9, VOID, [x, y + 2.16, zz + 0.61], [-0.6, 0, 0]);
   };
   const portholes = (u0, u1, drop) => {
     for (let u = u0; u < u1; u += 1.9 / L) {
       for (const v of [0.035, 0.965]) {
         const e = hull(u, v + (v < 0.5 ? drop : -drop), 1.006);
-        b.add(new THREE.CircleGeometry(0.2, 8), VOID, pose(e, [0, v < 0.5 ? -Math.PI / 2 : Math.PI / 2, 0]));
+        b.disc(0.2, 8, VOID, e, [0, v < 0.5 ? -Math.PI / 2 : Math.PI / 2, 0]);
       }
     }
   };
@@ -349,26 +240,27 @@ export function steamer() {
     });
     for (const h of hatches) {
       for (const s of [-1, 1]) {
-        b.box([0.2, 0.7, 4.7], [s * 2.45, deckY(h) + 0.3, z(h)], [0, 0, 0], RUST);
-        b.box([5.1, 0.7, 0.2], [0, deckY(h) + 0.3, z(h) + s * 2.3], [0, 0, 0], RUST);
+        b.box([0.2, 0.7, 4.7], [s * 2.45, deckY(h) + 0.3, z(h)], RUST);
+        b.box([5.1, 0.7, 0.2], [0, deckY(h) + 0.3, z(h) + s * 2.3], RUST);
       }
-      b.box([4.7, 0.05, 4.4], [0, deckY(h) - 1.6, z(h)], [0, 0, 0], VOID);
+      b.box([4.7, 0.05, 4.4], [0, deckY(h) - 1.6, z(h)], VOID);
     }
   };
   // The solid wall above the deck edge.
   const bulwark = (u0, u1, height) => {
     for (const side of [0, 1]) {
-      b.patch((u, t) => { const e = hull(u, side); return [e[0], e[1] + t * height, e[2]]; }, {
-        u: [u0, u1], nu: Math.round((u1 - u0) * 60), nv: 1, keep: (i) => hash(i, side + 70) > 0.16, color: (i) => shade(RUST, 0.8 + 0.35 * hash(i, 7)),
+      b.patch((u, t) => { const e = hull(u, side); return raised(e, t * height); }, {
+        u: [u0, u1], nu: Math.round((u1 - u0) * 60), nv: 1,
+        keep: (i) => hash(i, side + 70) > 0.16, color: (i) => shade(RUST, 0.8 + 0.35 * hash(i, 7)),
       });
     }
   };
   const house = (size, at, windowsPerSide, color) => {
-    b.box(size, at, [0, 0, 0], color);
+    b.box(size, at, color);
     for (const side of [-1, 1]) {
       for (let k = 0; k < windowsPerSide; k++) {
         const along = at[2] - size[2] / 2 + (k + 0.5) * size[2] / windowsPerSide;
-        b.box([0.06, 0.62, 0.5], [at[0] + side * (size[0] / 2 + 0.02), at[1] + size[1] * 0.14, along], [0, 0, 0], VOID);
+        b.box([0.06, 0.62, 0.5], [at[0] + side * (size[0] / 2 + 0.02), at[1] + size[1] * 0.14, along], VOID);
       }
     }
   };
@@ -388,24 +280,25 @@ export function steamer() {
     const houseY = deckY(0.52);
     house([8.6, 2.6, 8.4], [0, houseY + 1.3, z(0.505)], 6, PAINT);
     house([6.4, 2.4, 4.2], [0, houseY + 3.8, z(0.535)], 3, PAINT);
-    for (let k = -2; k <= 2; k++) b.box([0.7, 0.62, 0.06], [k * 1.15, houseY + 4.15, z(0.535) + 2.12], [0, 0, 0], VOID);
-    b.box([B * 0.98, 0.14, 2.0], [0, houseY + 2.67, z(0.555)], [0, 0, 0], RUST_PALE);            // bridge wings
-    b.box([6.9, 0.12, 4.7], [0, houseY + 5.06, z(0.535)], [0, 0, 0], RUST_PALE);                 // bridge roof
+    for (let k = -2; k <= 2; k++) b.box([0.7, 0.62, 0.06], [k * 1.15, houseY + 4.15, z(0.535) + 2.12], VOID);
+    b.box([B * 0.98, 0.14, 2.0], [0, houseY + 2.67, z(0.555)], RUST_PALE);            // bridge wings
+    b.box([6.9, 0.12, 4.7], [0, houseY + 5.06, z(0.535)], RUST_PALE);                 // bridge roof
     const roof = houseY + 2.6;
     railing([[-4.2, roof, z(0.44)], [-4.2, roof, z(0.47)], [-4.2, roof, z(0.50)]]);
     railing([[4.2, roof, z(0.44)], [4.2, roof, z(0.47)], [4.2, roof, z(0.50)]]);
     b.within(pose([0, roof, z(0.47)], [-0.13, 0, 0.06]), () => {
-      b.add(new THREE.CylinderGeometry(1.3, 1.45, 7.2, 14, 1, true), RUST, pose([0, 3.6, 0]));
-      b.add(new THREE.CylinderGeometry(1.36, 1.38, 0.5, 14, 1, true), PAINT, pose([0, 5.6, 0]));
-      b.add(new THREE.CylinderGeometry(1.39, 1.41, 0.5, 14, 1, true), PAINT, pose([0, 4.6, 0]));
-      b.add(new THREE.CircleGeometry(1.24, 14), VOID, pose([0, 7.0, 0], [-Math.PI / 2, 0, 0]));
+      b.cylinder([1.3, 1.45], 7.2, 14, RUST, [0, 3.6, 0], [0, 0, 0], true);
+      b.cylinder([1.36, 1.38], 0.5, 14, PAINT, [0, 5.6, 0], [0, 0, 0], true);
+      b.cylinder([1.39, 1.41], 0.5, 14, PAINT, [0, 4.6, 0], [0, 0, 0], true);
+      b.disc(1.24, 14, VOID, [0, 7.0, 0], [-Math.PI / 2, 0, 0]);
       b.spar([0.2, 0, 1.5], [0.2, 6.6, 1.45], 0.13, RUST_DARK, 0.13, 5);                        // steam pipe
     });
     cowl(-2.6, roof, z(0.495)); cowl(2.6, roof, z(0.495)); cowl(-2.9, roof, z(0.445)); cowl(2.9, roof, z(0.445));
     // Boat davits on the house roof. One boat still hangs from the port pair.
     for (const side of [-1, 1]) {
       for (const u of [0.455, 0.485]) {
-        b.line([[side * 4.0, roof, z(u)], [side * 4.1, roof + 2.1, z(u)], [side * 4.7, roof + 2.9, z(u)], [side * 5.5, roof + 2.7, z(u)]], 0.08, IRON);
+        const davit = [[4.0, 0], [4.1, 2.1], [4.7, 2.9], [5.5, 2.7]]; // distance from the middle, height above the roof
+        b.line(davit.map(([x, y]) => [side * x, roof + y, z(u)]), 0.08, IRON);
       }
     }
     b.within(pose([5.6, roof + 1.5, z(0.47)], [0.25, 0, 0.5]), () => b.patch(lifeboat, { nu: 10, nv: 6, color: WOOD_PALE }));
@@ -419,15 +312,19 @@ export function steamer() {
     b.spar([0, deckY(mastU) + 1.2, z(mastU) + 0.3], [-3.3, deckY(mastU) + 0.9, z(0.80)], 0.15, RUST_DARK, 0.10);
     b.spar(head, [0, deckY(0.97) + 2.0, z(0.97)], 0.03, ROPE, 0.03, 4);
     for (const side of [-1, 1]) b.spar(head, [side * half(0.68) * 0.95, deckY(0.68) + 1.0, z(0.68)], 0.03, ROPE, 0.03, 4);
-    b.box([1.9, 0.8, 1.3], [0, deckY(mastU) + 0.4, z(mastU) - 1.5], [0, 0, 0], IRON);
+    b.box([1.9, 0.8, 1.3], [0, deckY(mastU) + 0.4, z(mastU) - 1.5], IRON);
     b.spar([-1.4, deckY(mastU) + 0.6, z(mastU) - 1.5], [1.4, deckY(mastU) + 0.6, z(mastU) - 1.5], 0.42, RUST_DARK, 0.42, 9);
 
     // Raised forecastle with the anchor windlass.
     const fore = 1.9;
     bulwark(0.86, 0.995, fore);
-    b.patch((u, w) => [(w * 2 - 1) * half(u) * 0.97, deckY(u) + fore, z(u)], { u: [0.865, 0.985], nu: 9, nv: 8, color: (i, j) => shade(RUST_PALE, 0.7 + 0.3 * hash(i + 2, j)) });
-    b.patch((w, t) => [(w * 2 - 1) * half(0.865) * 0.97, deckY(0.865) + t * fore, z(0.865)], { nu: 8, nv: 2, keep: (i, j) => !(i === 3 && j === 0), color: RUST });
-    b.box([2.6, 0.9, 1.2], [0, deckY(0.93) + fore + 0.45, z(0.93)], [0, 0, 0], IRON);
+    b.patch((u, w) => [(w * 2 - 1) * half(u) * 0.97, deckY(u) + fore, z(u)], {
+      u: [0.865, 0.985], nu: 9, nv: 8, color: (i, j) => shade(RUST_PALE, 0.7 + 0.3 * hash(i + 2, j)),
+    });
+    b.patch((w, t) => [(w * 2 - 1) * half(0.865) * 0.97, deckY(0.865) + t * fore, z(0.865)], {
+      nu: 8, nv: 2, keep: (i, j) => !(i === 3 && j === 0), color: RUST, // the gap is a doorway
+    });
+    b.box([2.6, 0.9, 1.2], [0, deckY(0.93) + fore + 0.45, z(0.93)], IRON);
     b.spar([-1.7, deckY(0.93) + fore + 0.7, z(0.93)], [1.7, deckY(0.93) + fore + 0.7, z(0.93)], 0.36, RUST_DARK, 0.36, 9);
     const rail = [];
     for (let u = 0.87; u <= 0.985; u += 0.023) rail.push([half(u) * 0.95, deckY(u) + fore, z(u)]);
@@ -448,29 +345,32 @@ export function steamer() {
     const poopY = deckY(0.11);
     house([6.2, 2.3, 6.0], [0, poopY + 1.15, z(0.115)], 4, PAINT);
     railing([[-3.0, poopY + 2.3, z(0.07)], [-3.0, poopY + 2.3, z(0.11)], [-3.0, poopY + 2.3, z(0.16)]]);
-    b.box([1.8, 0.9, 1.6], [0, poopY + 0.45, z(0.035)], [0, 0, 0], IRON);                        // steering gear
+    b.box([1.8, 0.9, 1.6], [0, poopY + 0.45, z(0.035)], IRON);                        // steering gear
     b.spar([0, deckY(0.27), z(0.27)], [0.9, deckY(0.27) + 5.2, z(0.268)], 0.28, RUST_DARK, 0.22, 8); // broken main mast
     cowl(-2.4, deckY(0.29), z(0.29)); cowl(2.4, deckY(0.29), z(0.29));
     // Rudder and propeller. The shaft leaves the hull above the keel.
-    b.box([0.3, 3.6, 2.7], [0, -2.3, z(0.012)], [0, 0.35, 0], RUST_DARK);
+    b.box([0.3, 3.6, 2.7], [0, -2.3, z(0.012)], RUST_DARK, [0, 0.35, 0]);
     b.spar([0, -3.0, z(0.10)], [0, -3.0, z(0.04)], 0.28, IRON, 0.28, 8);
     for (let k = 0; k < 4; k++) {
-      b.within(pose([0, -3.0, z(0.045)], [0, 0, k * Math.PI / 2 + 0.4]), () => b.box([0.95, 1.9, 0.14], [0, 1.15, 0], [0, 0.5, 0], RUST_PALE));
+      const blade = pose([0, -3.0, z(0.045)], [0, 0, k * Math.PI / 2 + 0.4]);
+      b.within(blade, () => b.box([0.95, 1.9, 0.14], [0, 1.15, 0], RUST_PALE, [0, 0.5, 0]));
     }
   });
 
   // On the sand: the upper mast, a boiler that fell out of the break, a lifeboat, the anchor on its chain, plates and pipes.
   b.spar([4.5, 2.0, z(0.27) - 4], [15.5, 0.25, z(0.27) - 12], 0.22, RUST_DARK, 0.12, 8);
   b.within(pose([6.5, 0, z(0.375) - 1.0], [0, 1.1, 0]), () => {
-    b.add(new THREE.CylinderGeometry(1.9, 1.9, 5.2, 14, 1, true), RUST_DARK, pose([0, 1.35, 0], [Math.PI / 2, 0, 0]));
-    b.add(new THREE.CircleGeometry(1.9, 14), IRON, pose([0, 1.35, 2.6]));
-    for (const x of [-0.8, 0.8]) b.add(new THREE.CircleGeometry(0.5, 9), VOID, pose([x, 0.9, 2.62]));
+    b.cylinder([1.9, 1.9], 5.2, 14, RUST_DARK, [0, 1.35, 0], [Math.PI / 2, 0, 0], true);
+    b.disc(1.9, 14, IRON, [0, 1.35, 2.6]);
+    for (const x of [-0.8, 0.8]) b.disc(0.5, 9, VOID, [x, 0.9, 2.62]);
   });
   b.within(pose([-10.5, -0.05, z(0.50)], [0, 0.5, Math.PI]), () => b.patch(lifeboat, { nu: 10, nv: 6, color: WOOD_PALE }));
   const chain = [[-3.2, 4.4, z(0.955) + 1.5], [-4.6, 1.3, z(0.99) + 3.5], [-5.4, 0.12, z(1) + 6.5], [-5.0, 0.1, z(1) + 10.5]];
   b.line(chain, 0.085, IRON);
   b.within(pose([-5.0, 0, z(1) + 12.3], [0, 0.2, 0]), () => anchor(b, 1.15, IRON));
-  scatter(b, rand, 12, 7, 20, (i) => b.box([1.6 + (i % 3) * 0.8, 0.05, 1.3 + (i % 4) * 0.5], [0, 0.07, 0], [0.08, 0, 0.05], shade(RUST, 0.8 + 0.1 * (i % 4))));
+  scatter(b, rand, 12, 7, 20, (i) => {
+    b.box([1.6 + (i % 3) * 0.8, 0.05, 1.3 + (i % 4) * 0.5], [0, 0.07, 0], shade(RUST, 0.8 + 0.1 * (i % 4)), [0.08, 0, 0.05]);
+  });
   scatter(b, rand, 6, 6, 16, (i) => b.spar([0, 0.12, -1.6], [0, 0.14, 1.6 + (i % 3)], 0.11, RUST_DARK, 0.11, 6));
   return b.build();
 }

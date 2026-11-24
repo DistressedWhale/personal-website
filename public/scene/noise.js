@@ -1,22 +1,11 @@
 import * as THREE from 'three';
-
-// Small seeded generator, so the scene looks the same on every load.
-export function rng(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+import { rng, TAU } from './util.js';
 
 // Gradient noise on a lattice that repeats every `period` cells, so the texture tiles.
 function periodicNoise(period, rand) {
   const grad = new Float32Array(period * period * 2);
   for (let i = 0; i < period * period; i++) {
-    const a = rand() * Math.PI * 2;
+    const a = rand() * TAU;
     grad[i * 2] = Math.cos(a);
     grad[i * 2 + 1] = Math.sin(a);
   }
@@ -35,21 +24,20 @@ function periodicNoise(period, rand) {
   };
 }
 
-// Tileable fractal noise. Each channel holds an independent pattern in the range 0..1.
-export function makeNoiseTexture(size = 256, seed = 7) {
+// Tileable fractal noise. Each of the four channels holds an independent pattern in the range 0..1.
+export function makeNoiseTexture(size, seed) {
   const rand = rng(seed);
   const data = new Uint8Array(size * size * 4);
-  for (let ch = 0; ch < 4; ch++) {
-    const octaves = [4, 8, 16, 32, 64].map((p) => periodicNoise(p, rand));
+  for (let channel = 0; channel < 4; channel++) {
+    const octaves = [4, 8, 16, 32, 64].map((period) => ({ period, noise: periodicNoise(period, rand) }));
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
-        let sum = 0, amp = 0.5, period = 4;
-        for (const n of octaves) {
-          sum += amp * n((x / size) * period, (y / size) * period);
+        let sum = 0, amp = 0.5;
+        for (const { period, noise } of octaves) {
+          sum += amp * noise((x / size) * period, (y / size) * period);
           amp *= 0.55;
-          period *= 2;
         }
-        data[(y * size + x) * 4 + ch] = Math.max(0, Math.min(255, (sum * 0.9 + 0.5) * 255));
+        data[(y * size + x) * 4 + channel] = Math.max(0, Math.min(255, (sum * 0.9 + 0.5) * 255));
       }
     }
   }

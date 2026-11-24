@@ -1,25 +1,30 @@
 // GLSL shared by the scene shaders, so they all agree on the water colour and the light.
 
-export const FINE_TILE = 32;
-export const SWELL_TILE = 128;
-export const NOISE_SIZE = 256; // texels along one side of the noise texture
+export const FINE_TILE = 32;      // metres. The fine wave field repeats over this distance.
+export const SWELL_TILE = 128;    // metres. The swell wave field repeats over this distance.
+export const TERRAIN_TILE = 512;  // metres. The sea floor and uTravel repeat over this distance.
+export const NOISE_SIZE = 256;    // texels along one side of the noise texture
+export const LOOP = 600;          // seconds. Motion driven by uLoop repeats exactly over this time, so the wrap shows no jump.
 
 export const common = /* glsl */ `
 uniform sampler2D uWaveTex;   // fine waves.  r: caustic, gb: height gradient, a: height
 uniform sampler2D uSwellTex;  // swell waves. same layout
-uniform vec3 uSunWater;       // unit vector toward the sun, under water
-uniform vec2 uTravel;         // distance the whale has swum, wrapped to the 512 m terrain tile
-uniform float uCamDepth;      // depth of the camera in metres
 uniform sampler2D uNoise;     // tileable noise, four independent channels
+uniform vec3 uSunWater;       // unit vector toward the sun, under water
+uniform vec2 uTravel;         // distance the whale has swum, wrapped to the terrain tile
+uniform float uCamDepth;      // depth of the camera in metres
+uniform float uLoop;          // seconds, wrapped to the loop time
 
 const float TAU = 6.2831853;
 const float FINE_TILE = ${FINE_TILE.toFixed(1)};
 const float SWELL_TILE = ${SWELL_TILE.toFixed(1)};
+const float TERRAIN_TILE = ${TERRAIN_TILE.toFixed(1)};
 const float NOISE_SIZE = ${NOISE_SIZE.toFixed(1)};
-const vec3 EXT = vec3(0.058, 0.021, 0.0155);    // loss per metre along the view path
-const vec3 ABSORB = vec3(0.110, 0.020, 0.0125); // loss per metre for sunlight going down
-const float FLOOR_Y = -74.0;                    // mean height of the sea floor
+const float LOOP = ${LOOP.toFixed(1)};
+const float FLOOR_Y = -74.0;                         // mean height of the sea floor
 const vec3 SAND = vec3(0.50, 0.44, 0.33);
+const vec3 EXT = vec3(0.058, 0.021, 0.0155);         // loss per metre along the view path
+const vec3 ABSORB = vec3(0.110, 0.020, 0.0125);      // loss per metre for sunlight going down
 const vec3 AMBIENT_LOSS = vec3(0.060, 0.020, 0.014); // loss per metre for light scattered down from the surface
 
 // Colour of open water in a view direction. Fog and the background both use it, so objects fade into it.
@@ -50,9 +55,9 @@ vec2 eased(vec2 uv) {
   return (floor(uv) + f * f * (3.0 - 2.0 * f) - 0.5) / NOISE_SIZE;
 }
 
-// Height of the sand at a world position: broad dunes plus small bumps. The pattern repeats every 512 m.
+// Height of the sand at a world position: broad dunes plus small bumps.
 float floorHeight(vec2 xz) {
-  vec2 uv = (xz + uTravel) / 512.0;
+  vec2 uv = (xz + uTravel) / TERRAIN_TILE;
   float dunes = textureLod(uNoise, eased(uv), 0.0).r;
   float bumps = textureLod(uNoise, eased(uv * 4.0 + 0.3), 0.0).g;
   return FLOOR_Y + (dunes - 0.5) * 16.0 + (bumps - 0.5) * 3.5;
@@ -80,19 +85,29 @@ vec3 sunAt(float depth) {
   return vec3(1.0, 0.96, 0.88) * exp(-ABSORB * max(depth, 0.0) / uSunWater.y);
 }
 
+// Light scattered by the water. It arrives from everywhere, strongest from above.
+vec3 skyLight(vec3 N, float depth) {
+  float skyward = N.y * 0.5 + 0.5;
+  return mix(vec3(0.010, 0.060, 0.110), vec3(0.060, 0.330, 0.470), skyward * skyward) * exp(-AMBIENT_LOSS * depth);
+}
+
 // Standard lighting for an opaque surface: caustic sunlight from above, scattered light from all sides, then fog.
 vec3 shadeSurface(vec3 albedo, vec3 N, vec3 V, vec3 worldPos, float gloss, float flash) {
   float depth = -worldPos.y;
   float ndl = dot(N, uSunWater);
   float caustic = causticAt(worldPos);
   vec3 sun = sunAt(depth) * clamp((ndl + 0.35) / 1.35, 0.0, 1.0) * mix(1.0, caustic, 0.8 * smoothstep(-0.05, 0.35, ndl));
-  float skyward = N.y * 0.5 + 0.5;
-  vec3 ambient = mix(vec3(0.010, 0.060, 0.110), vec3(0.060, 0.330, 0.470), skyward * skyward)
-               * exp(-AMBIENT_LOSS * depth);
-  vec3 col = albedo * (sun * 1.3 + ambient * 1.5);
+  vec3 col = albedo * (sun * 1.3 + skyLight(N, depth) * 1.5);
   vec3 H = normalize(uSunWater + V);
   col += sunAt(depth) * pow(max(dot(N, H), 0.0), gloss) * flash * (0.3 + caustic);
   col += waterBg(reflect(-V, N)) * pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.6;
   return fogged(col, worldPos);
 }
+`;
+
+// First lines of a fragment main(): the unit normal N and the unit vector V toward the eye. A back face is lit like a front face.
+export const facing = /* glsl */ `
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(cameraPosition - vWorld);
+  if (dot(N, V) < 0.0) N = -N;
 `;

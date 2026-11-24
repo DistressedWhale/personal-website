@@ -1,27 +1,27 @@
 import * as THREE from 'three';
-import { common } from './glsl.js';
-import { rng } from './noise.js';
+import { common, facing } from './glsl.js';
+import { TAU, rng, mesh } from './util.js';
 import { sailingShip, steamer } from './wrecks.js';
 
-const CELL = 3;   // metres between floor vertices
-const CELLS = 170;
+const CELL = 3;     // metres between floor vertices
+const CELLS = 170;  // floor cells along one side
+// The wreck models, each with the half length and half width of the dark patch under it.
+const WRECKS = [
+  { model: sailingShip, patch: [20, 7.5] },
+  { model: steamer, patch: [33, 9.5] },
+];
 
-export function createSeafloor(shared) {
-  const rand = rng(606);
-  const range = (a, b) => a + rand() * (b - a);
-  const group = new THREE.Group();
-
-  // The vertex grid is flat. The shader lifts each vertex to the dune height at its place.
-  const floorGeo = new THREE.PlaneGeometry(CELL * CELLS, CELL * CELLS, CELLS, CELLS);
-  floorGeo.rotateX(-Math.PI / 2);
-  const floorMat = new THREE.ShaderMaterial({
-    uniforms: {
-      ...shared,
-      uWhale: { value: new THREE.Vector3() },
-      uWhaleDir: { value: new THREE.Vector2(0, 1) },
-      uWreck: { value: [new THREE.Vector4(), new THREE.Vector4()] },                 // x, z, then the unit bow direction
-      uWreckSize: { value: [new THREE.Vector2(20, 7.5), new THREE.Vector2(33, 9.5)] }, // half length, half width
-    },
+// The sand. The vertex grid is flat, and the shader lifts each vertex to the dune height at its place.
+function createFloor(shared) {
+  const uniforms = {
+    ...shared,
+    uWhale: { value: new THREE.Vector3() },
+    uWhaleDir: { value: new THREE.Vector2(0, 1) },
+    uWreck: { value: WRECKS.map(() => new THREE.Vector4()) },                // x, z, then the unit bow direction
+    uWreckSize: { value: WRECKS.map((w) => new THREE.Vector2(...w.patch)) }, // half length, half width
+  };
+  const floor = mesh(new THREE.PlaneGeometry(CELL * CELLS, CELL * CELLS, CELLS, CELLS).rotateX(-Math.PI / 2), new THREE.ShaderMaterial({
+    uniforms,
     vertexShader: /* glsl */ `
       ${common}
       varying vec3 vWorld;
@@ -34,9 +34,9 @@ export function createSeafloor(shared) {
     `,
     fragmentShader: /* glsl */ `
       ${common}
+      #define WRECKS ${WRECKS.length}
       uniform vec3 uWhale;
       uniform vec2 uWhaleDir;
-      #define WRECKS 2
       uniform vec4 uWreck[WRECKS];
       uniform vec2 uWreckSize[WRECKS];
       varying vec3 vWorld;
@@ -50,7 +50,7 @@ export function createSeafloor(shared) {
         float hx = floorHeight(p + vec2(E, 0.0)) - floorHeight(p - vec2(E, 0.0));
         float hz = floorHeight(p + vec2(0.0, E)) - floorHeight(p - vec2(0.0, E));
 
-        // Long sand ripples. The wave numbers fit the 512 m terrain tile, so the wrap shows no seam.
+        // Long sand ripples. The wave numbers give 120 and 45 whole cycles per terrain tile, so the wrap shows no seam.
         const vec2 K = vec2(1.47262, 0.55223);
         float warp = texture(uNoise, tp / 64.0).b;
         float phase = dot(tp, K) + warp * 9.0;
@@ -81,18 +81,19 @@ export function createSeafloor(shared) {
         gl_FragColor = vec4(shadeSurface(albedo, N, V, vWorld, 6.0, 0.0), 1.0);
       }
     `,
-  });
-  const floor = new THREE.Mesh(floorGeo, floorMat);
-  floor.frustumCulled = false;
-  group.add(floor);
+  }));
+  return { floor, uniforms };
+}
 
-  const wreckMaterial = new THREE.ShaderMaterial({
+// One material for every wreck. It reads the colour and seam count per vertex, and adds grain, growth and silt.
+function createWreckMaterial(shared) {
+  return new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
     uniforms: { ...shared },
     vertexShader: /* glsl */ `
       ${common}
-      attribute vec4 aColor;
-      attribute vec3 aUV; // texture coordinate in metres, then the rigid flag
+      attribute vec4 aColor; // rgb, then seams per metre: planks for wood, plates for steel, 0 for none, -1 for an opening
+      attribute vec3 aUV;    // texture coordinate in metres, then the rigid flag
       varying vec3 vWorld;
       varying vec3 vNormal;
       varying vec4 vColor;
@@ -118,9 +119,7 @@ export function createSeafloor(shared) {
       varying vec2 vUV;
       varying float vHeight;
       void main() {
-        vec3 N = normalize(vNormal);
-        vec3 V = normalize(cameraPosition - vWorld);
-        if (dot(N, V) < 0.0) N = -N;
+        ${facing}
         float seams = vColor.a;
         float wood = step(1.5, seams);
         float plate = step(0.1, seams) * (1.0 - wood);
@@ -155,39 +154,42 @@ export function createSeafloor(shared) {
       }
     `,
   });
+}
 
-  const wrecks = [sailingShip(), steamer()].map((geometry) => new THREE.Mesh(geometry, wreckMaterial));
+export function createSeafloor(shared) {
+  const rand = rng(606);
+  const { floor, uniforms } = createFloor(shared);
+  const material = createWreckMaterial(shared);
+  const wrecks = WRECKS.map((w) => mesh(w.model(), material));
+  // Puts a wreck on the sand at distance z ahead, a little off the course of the whale and turned any way.
   const place = (wreck, z) => {
-    wreck.position.set(range(-38, 38), 0, z);
-    wreck.rotation.y = range(0, Math.PI * 2);
+    wreck.position.set(rand.range(-38, 38), 0, z);
+    wreck.rotation.y = rand.range(0, TAU);
   };
-  for (const wreck of wrecks) {
-    wreck.frustumCulled = false;
-    group.add(wreck);
-  }
   place(wrecks[0], 75);
   place(wrecks[1], 420);
 
   const where = new THREE.Vector3();
-  // The grid follows the camera in whole cells. Each vertex then stays on the same spot of sand.
+  // The floor grid follows the camera in whole cells. Each vertex then stays on the same spot of sand.
   const snap = (c, t) => c - ((((c + t) % CELL) + CELL) % CELL);
   return {
-    group,
-    // Test views: ?focus=wreck looks at the sailing ship, ?focus=wreck2 at the steamer.
-    target: (index) => where.set(wrecks[index].position.x, -70, wrecks[index].position.z),
+    group: new THREE.Group().add(floor, ...wrecks),
+    // Points a test view can look at: ?focus=wreck is the sailing ship, ?focus=wreck2 the steamer.
+    targets: {
+      wreck: () => where.set(wrecks[0].position.x, -70, wrecks[0].position.z),
+      wreck2: () => where.set(wrecks[1].position.x, -70, wrecks[1].position.z),
+    },
     // `travel` is the distance swum so far, `velocity` the velocity of the whale.
     update(dt, camera, travel, velocity, whaleMesh) {
       floor.position.set(snap(camera.position.x, travel.x), 0, snap(camera.position.z, travel.z));
-      floorMat.uniforms.uWhale.value.copy(whaleMesh.position);
-      floorMat.uniforms.uWhaleDir.value.set(Math.sin(whaleMesh.rotation.y), Math.cos(whaleMesh.rotation.y));
-
-      for (let i = 0; i < wrecks.length; i++) {
-        const wreck = wrecks[i];
+      uniforms.uWhale.value.copy(whaleMesh.position);
+      uniforms.uWhaleDir.value.set(Math.sin(whaleMesh.rotation.y), Math.cos(whaleMesh.rotation.y));
+      wrecks.forEach((wreck, i) => {
         wreck.position.x -= velocity.x * dt;
         wreck.position.z -= velocity.z * dt;
-        if (wreck.position.z < -300 || Math.abs(wreck.position.x) > 300) place(wreck, range(330, 560));
-        floorMat.uniforms.uWreck.value[i].set(wreck.position.x, wreck.position.z, Math.sin(wreck.rotation.y), Math.cos(wreck.rotation.y));
-      }
+        if (wreck.position.z < -300 || Math.abs(wreck.position.x) > 300) place(wreck, rand.range(330, 560));
+        uniforms.uWreck.value[i].set(wreck.position.x, wreck.position.z, Math.sin(wreck.rotation.y), Math.cos(wreck.rotation.y));
+      });
     },
   };
 }
