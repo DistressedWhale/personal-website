@@ -29,18 +29,15 @@ this page was written, so the commands show `npx`.
 ### Domain
 
 The DNS zone for `cetaceous.dev` is on Cloudflare. `wrangler.jsonc` attaches the
-Worker with a zone route, `cetaceous.dev/*`. The route catches each request at
-the Cloudflare proxy, so the request never reaches the origin.
+Worker as a custom domain. Cloudflare creates the DNS record and the certificate
+for it, so the zone needs no A or AAAA record for the apex.
 
-The proxied DNS records for `cetaceous.dev` are left from the Google Cloud Run
-setup. The route needs a proxied record to exist, so do not delete them without
-a replacement.
+Cloudflare refuses a custom domain while another A, AAAA or CNAME record exists
+for the same hostname (API error 100117). The wrangler login has no DNS write
+permission, so delete such a record in the dashboard.
 
-A custom domain is the tidier setup, because Cloudflare then owns the DNS
-record. Cloudflare refuses it while the old records exist (API error 100117).
-To switch: delete the old records in the dashboard, change the route to
-`{ "pattern": "cetaceous.dev", "custom_domain": true }`, and deploy. The
-wrangler login has no DNS write permission, so wrangler cannot delete them.
+The MX and TXT records of the zone belong to Cloudflare Email Routing. Do not
+delete them.
 
 ## Caddy
 

@@ -1,8 +1,8 @@
 {
   "name": "personal-website",
   "compatibility_date": "2026-11-01",
-  // A zone route works with the DNS record that already exists. A custom domain needs that record deleted first.
-  "routes": [{ "pattern": "cetaceous.dev/*", "zone_name": "cetaceous.dev" }],
+  // Cloudflare creates the DNS record and the certificate for a custom domain.
+  "routes": [{ "pattern": "cetaceous.dev", "custom_domain": true }],
   // The Worker has no script. Cloudflare serves the files in public/ directly.
   "assets": {
     "directory": "./public",
