@@ -1,15 +1,6 @@
----
-title: Hosting
-tags:
-  - personal-website
-  - reference
-  - cloudflare
-type: reference
-status: active
-created: 2026-11-24
----
+# personal-website
 
-# Hosting
+Source of cetaceous.dev.
 
 The site is static. All served files live in `public/`.
 
@@ -24,7 +15,7 @@ npx wrangler deploy   # publish to cetaceous.dev
 ```
 
 `bun` is the preferred runner (`bunx wrangler ...`). It was not installed when
-this page was written, so the commands show `npx`.
+this file was written, so the commands show `npx`.
 
 ### Domain
 
@@ -59,7 +50,3 @@ Caddy in a container on Google Cloud Run.
 | `frontend/` | `development` | Next.js 16 app: home page, navbar, `/dwtssolver` tool with hull piece images. Not ported. |
 | `terraform/`, `.github/workflows/` | both | Google Cloud only. Not needed on Cloudflare. |
 | `consumer/`, `api/` | `master` | Network Rail STOMP consumer and FastAPI. Not part of the site. |
-
-## Related
-
-- [[personal-website/docs/Home.md|Home]]
