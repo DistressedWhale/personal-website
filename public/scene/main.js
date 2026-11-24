@@ -5,6 +5,7 @@ import { createOcean } from './ocean.js';
 import { createWhale } from './whale.js';
 import { createFish } from './fish.js';
 import { createCreatures } from './creatures.js';
+import { createSeafloor } from './seafloor.js';
 
 const TAU = Math.PI * 2;
 const canvas = document.getElementById('scene');
@@ -30,11 +31,13 @@ function start() {
     uSunAir: { value: sunAir },
     uTravel: { value: new THREE.Vector2() },
     uCamDepth: { value: 15 },
+    uTerrain: { value: null },
   };
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(46, 1, 0.5, 1500);
   const noise = makeNoiseTexture(256, 7);
+  shared.uTerrain.value = noise;
 
   const ocean = createOcean(shared);
   scene.add(ocean.group);
@@ -45,8 +48,11 @@ function start() {
   const fish = createFish(shared);
   scene.add(fish.mesh);
 
-  const creatures = createCreatures(shared, noise, whale.mesh);
+  const creatures = createCreatures(shared, noise, whale.mesh, fish.prey);
   scene.add(creatures.group);
+
+  const seafloor = createSeafloor(shared, noise);
+  scene.add(seafloor.group);
 
   // The scene renders to a float target. A second pass adds the light shafts and maps the result to the screen.
   const target = new THREE.WebGLRenderTarget(4, 4, {
@@ -244,8 +250,8 @@ function start() {
     shared.uTravel.value.set(travel.x % 512, travel.z % 512);
 
     // Chase camera. It drifts around the rear of the whale and never settles.
-    fish.update(time, dt, velocity);
     creatures.update(time, dt, velocity);
+    fish.update(time, dt, velocity, creatures.threats, whale.mesh);
 
     // After a drag the camera holds the chosen view for a few seconds, then eases back to its own path.
     if (drag.active) {
@@ -270,14 +276,17 @@ function start() {
     const dist = (fixed.dist ?? 35 + 7 * Math.sin(time * 0.0170 + 2.0) + 4 * Math.sin(time * 0.0071)) * (tall ? 1.45 : 1);
     lookAt.set(Math.sin(yaw) * 3, depth + 0.5, Math.cos(yaw) * 3);
     if (focus && creatures.targets[focus]) lookAt.copy(creatures.targets[focus]());
+    if (focus && fish.targets[focus]) lookAt.copy(fish.targets[focus]());
+    if (focus === 'wreck') lookAt.copy(seafloor.target());
     camera.position.set(
       lookAt.x + Math.sin(az + yaw) * Math.cos(el) * dist,
-      Math.min(lookAt.y + Math.sin(el) * dist, -4.5),
+      THREE.MathUtils.clamp(lookAt.y + Math.sin(el) * dist, -46, -4.5),
       lookAt.z - Math.cos(az + yaw) * Math.cos(el) * dist,
     );
     camera.lookAt(lookAt);
     camera.updateMatrixWorld();
     shared.uCamDepth.value = -camera.position.y;
+    seafloor.update(dt, camera, travel, velocity, whale.mesh);
   }
 
   function render() {
@@ -306,7 +315,7 @@ function start() {
     requestAnimationFrame(tick);
   }
 
-  window.__scene = { renderer, camera, whale, get time() { return time; } };
+  window.__scene = { renderer, camera, whale, fish, get time() { return time; } };
   requestAnimationFrame((now) => { last = now; tick(now); });
 }
 

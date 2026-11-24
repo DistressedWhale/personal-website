@@ -9,11 +9,14 @@ uniform sampler2D uSwellTex;  // swell waves. same layout
 uniform vec3 uSunDir;         // unit vector toward the sun, under water
 uniform vec2 uTravel;         // distance the whale has swum, wrapped to the swell tile
 uniform float uCamDepth;      // metres below the surface
+uniform sampler2D uTerrain;   // tileable noise that shapes the sea floor
 
 const float FINE_TILE = 32.0;
 const float SWELL_TILE = 128.0;
 const vec3 EXT = vec3(0.058, 0.021, 0.0155);    // loss per metre along the view path
 const vec3 ABSORB = vec3(0.110, 0.020, 0.0125); // loss per metre for sunlight going down
+const float FLOOR_Y = -74.0;                    // mean height of the sea floor
+const vec3 SAND = vec3(0.50, 0.44, 0.33);
 
 // Colour of open water in a view direction. Fog and the background both use it, so objects fade into it.
 vec3 waterBg(vec3 dir) {
@@ -36,6 +39,14 @@ vec3 fogged(vec3 col, vec3 worldPos) {
   return mix(waterBg(v / d), col, exp(-EXT * d));
 }
 
+// Height of the sand at a world position: broad dunes plus small bumps. The pattern repeats every 512 m.
+float floorHeight(vec2 xz) {
+  vec2 uv = (xz + uTravel) / 512.0;
+  float dunes = textureLod(uTerrain, uv, 0.0).r;
+  float bumps = textureLod(uTerrain, uv * 4.0 + 0.3, 0.0).g;
+  return FLOOR_Y + (dunes - 0.5) * 16.0 + (bumps - 0.5) * 3.5;
+}
+
 // Point on the surface that the sun ray through worldPos came from.
 vec2 surfacePoint(vec3 worldPos) {
   float depth = max(-worldPos.y, 0.0);
@@ -49,7 +60,9 @@ float causticAt(vec3 worldPos) {
   float lod = clamp(depth * 0.045, 0.0, 3.5);
   float fine = textureLod(uWaveTex, sp / FINE_TILE, lod).r;
   float swell = textureLod(uSwellTex, sp / SWELL_TILE, lod * 0.5).r;
-  return fine * mix(1.0, swell, 0.30);
+  // Far down only the broad swell pattern is left. The blurred fine waves would show as a regular grid.
+  float deep = smoothstep(25.0, 60.0, depth);
+  return mix(fine, 1.0, deep * 0.9) * mix(1.0, swell, 0.30 + 0.55 * deep);
 }
 
 vec3 sunAt(float depth) {

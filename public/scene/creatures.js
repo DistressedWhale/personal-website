@@ -414,7 +414,7 @@ function createJellies(shared, loop, blooms, perBloom) {
 
 // ---------------------------------------------------------------------------------------------
 
-export function createCreatures(shared, noiseTexture, whaleMesh) {
+export function createCreatures(shared, noiseTexture, whaleMesh, prey) {
   const rand = rng(1234);
   const range = (a, b) => a + rand() * (b - a);
   const group = new THREE.Group();
@@ -434,7 +434,7 @@ export function createCreatures(shared, noiseTexture, whaleMesh) {
     }
     const pack = createPack(shared, loop, { slots, look: tunaLook, seed: 500 + k });
     group.add(pack.mesh);
-    return { ...pack, pos: new THREE.Vector3(0, -20, 9999), heading: 0, speed: 7, wait: 6 + k * 38, beat: 0, weave: range(0, TAU), level: -15 };
+    return { ...pack, pos: new THREE.Vector3(0, -20, 9999), heading: 0, speed: 7, wait: 6 + k * 38, beat: 0, weave: range(0, TAU), level: -15, target: null };
   });
 
   // Pilot fish: small striped fish that hold station around the head of the whale.
@@ -498,7 +498,15 @@ export function createCreatures(shared, noiseTexture, whaleMesh) {
     t.pos.y = t.level;
     t.heading = -side * range(0, 0.10);
     t.speed = range(6.4, 8.6);
+    // Pick a bait ball that is still ahead and hunt it.
+    const ahead = prey.filter((p) => p.z > -70 && p.z < 170);
+    t.target = ahead.length ? ahead[Math.floor(rand() * ahead.length)] : null;
   };
+
+  // Animals that small fish flee from, as spheres. An absent pack is parked far away.
+  const threats = [];
+  for (let i = 0; i < tuna.length * 2; i++) threats.push({ x: 0, y: 9999, z: 0, r: 6.5 });
+  for (let i = 0; i < mantas.length; i++) threats.push({ x: 0, y: 9999, z: 0, r: 4.5 });
 
   // Points a test view can look at, chosen with ?focus=tuna and so on.
   const targets = {
@@ -510,6 +518,7 @@ export function createCreatures(shared, noiseTexture, whaleMesh) {
   return {
     group,
     targets,
+    threats,
     // `velocity` is the velocity of the whale. Everything else moves against it.
     update(time, dt, velocity) {
       loop.value = time % LOOP;
@@ -524,11 +533,25 @@ export function createCreatures(shared, noiseTexture, whaleMesh) {
         }
         t.mesh.visible = true;
         t.weave += dt * 0.21;
-        let yaw = t.heading + 0.13 * Math.sin(t.weave) + 0.05 * Math.sin(t.weave * 2.7);
+        let hunting = 0;
+        if (t.target) {
+          const dx = t.target.x - t.pos.x, dz = t.target.z - t.pos.z;
+          if (dz > 3) {
+            // Turn toward the bait ball, at a limited rate, and match its depth.
+            const want = Math.atan2(dx, dz);
+            t.heading += THREE.MathUtils.clamp(want - t.heading, -0.4 * dt, 0.4 * dt);
+            t.pos.y += THREE.MathUtils.clamp(t.target.y - t.pos.y, -1.6 * dt, 1.6 * dt);
+            hunting = 1 - Math.min(Math.hypot(dx, dz) / 60, 1);
+          } else {
+            t.target = null;
+          }
+        }
+        // A pack weaves while it travels and runs straight when it attacks.
+        const yaw = t.heading + (0.13 * Math.sin(t.weave) + 0.05 * Math.sin(t.weave * 2.7)) * (1 - hunting);
         // Steer around the whale instead of through it.
         const near = Math.max(0, 1 - Math.abs(t.pos.x) / 12) * Math.max(0, 1 - Math.abs(t.pos.z) / 34);
         t.heading += Math.sign(t.pos.x || 1) * near * 0.5 * dt;
-        const climb = 0.16 * Math.sin(t.weave * 0.6 + 1);
+        const climb = 0.16 * Math.sin(t.weave * 0.6 + 1) * (1 - hunting);
         t.pos.x += (Math.sin(yaw) * t.speed - velocity.x) * dt;
         t.pos.z += (Math.cos(yaw) * t.speed - velocity.z) * dt;
         t.pos.y = Math.min(t.pos.y + climb * t.speed * 0.25 * dt, -6);
@@ -564,6 +587,20 @@ export function createCreatures(shared, noiseTexture, whaleMesh) {
           if (lead && lead.mesh.position.z > 60) placeManta(m, 0, lead);
           else placeManta(m, range(130, 190));
         }
+      });
+
+      tuna.forEach((t, k) => {
+        for (const end of [0, 1]) {
+          const spot = threats[k * 2 + end];
+          const along = end ? 6 : -6;
+          spot.x = t.pos.x + Math.sin(t.heading) * along;
+          spot.y = t.wait > 0 ? 9999 : t.pos.y;
+          spot.z = t.pos.z + Math.cos(t.heading) * along;
+        }
+      });
+      mantas.forEach((m, k) => {
+        const spot = threats[tuna.length * 2 + k];
+        spot.x = m.mesh.position.x; spot.y = m.mesh.position.y; spot.z = m.mesh.position.z;
       });
 
       for (let i = 0; i < BLOOMS; i++) {

@@ -15,8 +15,9 @@ model files.
 | `public/scene/main.js` | Renderer, whale motion, camera path and drag control, light shaft pass |
 | `public/scene/whale.js` | Whale shape, swim bend, skin shader |
 | `public/scene/ocean.js` | Wave textures, sea surface, backdrop, drifting specks |
-| `public/scene/fish.js` | Sardine schools |
+| `public/scene/fish.js` | Sardine schools, simulated as boids |
 | `public/scene/creatures.js` | Tuna packs, pilot fish, manta rays, jellyfish |
+| `public/scene/seafloor.js` | Sand floor, whale shadow, two shipwrecks |
 | `public/scene/glsl.js` | Water colour, fog and caustic code shared by all shaders |
 | `public/scene/noise.js` | Seeded random numbers and the tileable noise texture |
 | `public/vendor/three/` | three.js r187, bundled to one minified file with esbuild |
@@ -26,11 +27,29 @@ value before it goes to a shader, so the picture does not degrade over days.
 
 Address parameters fix one view for checks: `?t=120` sets the start time in
 seconds, `?az=0.5&el=0.2&dist=40` fix the camera angle and distance, and
-`?rays=0` turns the light shafts off, and `?focus=tuna`, `?focus=manta` or
-`?focus=jelly` point the camera at that animal instead of the whale.
+`?rays=0` turns the light shafts off, and `?focus=` points the camera at
+something other than the whale: `tuna`, `manta`, `jelly`, `ball`, `ring`,
+`stream` or `wreck`.
 
 A drag with the left mouse button, or one finger, turns the camera around the
 whale. Six seconds after release the camera eases back to its own path.
+
+## Fish simulation
+
+The sardines are boids. Each fish steers by three rules about the fish near it:
+keep clear, match heading, stay together. A hash grid finds the near fish, and
+the neighbour rules run on every second frame for each school.
+
+Each school adds one rule for its pattern:
+
+| Pattern | Rule |
+| --- | --- |
+| Ball | Stay inside a sphere that slowly swells and shrinks, and circle its upright axis |
+| Ring | Hold a circle of fixed radius and swim around it |
+| Stream | Follow a slowly turning course as one long ribbon |
+
+Every fish flees from the whale, the tuna and the manta rays. A tuna pack picks
+a ball when it sets off and swims through it, which tears the ball open.
 
 To update three.js, download the `three` package and run, in its `build` folder:
 
